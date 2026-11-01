@@ -1,7 +1,7 @@
 // ===== SOILMATE REAL-TIME API CLIENT =====
-// Connects directly to the FastAPI backend. Zero mock data.
+// Connects directly to FastAPI and preserves explicit provider failure states.
 
-const BASE = import.meta.env.VITE_API_BASE_URL || '/api'
+export const BASE = import.meta.env?.VITE_API_BASE_URL || '/api'
 
 async function request(path, options = {}) {
   const url = `${BASE}${path}`
@@ -11,12 +11,12 @@ async function request(path, options = {}) {
     headers['Content-Type'] = 'application/json'
   }
 
-  const res = await fetch(url, { ...options, headers })
+  const res = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(30000), ...options, headers })
   if (!res.ok) {
     let errorDetail = `Request failed (${res.status})`
     try {
       const errJson = await res.json()
-      if (errJson.detail) errorDetail = errJson.detail
+      if (errJson.detail) errorDetail = typeof errJson.detail === 'string' ? errJson.detail : 'Invalid input. Check the entered values.'
     } catch (_) {}
     throw new Error(errorDetail)
   }
@@ -55,12 +55,14 @@ export async function chatStream(
   try {
     const res = await fetch(url, {
       method: 'POST',
+      credentials: 'include',
       signal,
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream'
       },
       body: JSON.stringify({
+        request_id: crypto.randomUUID(),
         message,
         session_id: sessionId || null,
         language: language || null,
@@ -81,12 +83,17 @@ export async function chatStream(
     const reader = res.body.getReader()
     const decoder = new TextDecoder('utf-8')
     let buffer = ''
+    let completed = false
 
     while (true) {
       const { done, value } = await reader.read()
-      if (done) break
+      if (done) {
+        if (!completed) throw new Error('Connection ended before the answer completed. Reload history before retrying.')
+        break
+      }
 
       buffer += decoder.decode(value, { stream: true })
+      buffer = buffer.replace(/\r\n/g, '\n')
       const lines = buffer.split('\n\n')
       buffer = lines.pop() || '' // Keep unfinished chunk in buffer
 
@@ -97,17 +104,17 @@ export async function chatStream(
 
         if (eventMatch && dataMatch) {
           const eventType = eventMatch[1].trim()
-          try {
-            const parsedData = JSON.parse(dataMatch[1].trim())
-            if (eventType === 'progress' && onProgress) {
-              onProgress(parsedData)
-            } else if (eventType === 'complete' && onComplete) {
-              onComplete(parsedData)
-            } else if (eventType === 'error' && onError) {
-              onError(new Error(parsedData.message || 'Stream error'))
-            }
-          } catch (e) {
-            console.error('SSE parse error:', e, block)
+          const parsedData = JSON.parse(dataMatch[1].trim())
+          if (eventType === 'progress') onProgress?.(parsedData)
+          else if (eventType === 'complete') {
+            completed = true
+            await reader.cancel()
+            onComplete?.(parsedData)
+            return
+          } else if (eventType === 'error') {
+            completed = true
+            await reader.cancel()
+            throw new Error(parsedData.message || 'Stream error')
           }
         }
       }
@@ -194,7 +201,8 @@ export async function geocodePlace(query) {
 /** Speech-to-Text: Upload audio blob */
 export async function uploadSpeechAudio(audioBlob, language = null) {
   const fd = new FormData()
-  fd.append('file', audioBlob, 'speech.wav')
+  const extension = audioBlob.type.includes('webm') ? 'webm' : audioBlob.type.includes('mp4') ? 'mp4' : audioBlob.type.includes('ogg') ? 'ogg' : 'wav'
+  fd.append('file', audioBlob, `speech.${extension}`)
   if (language) fd.append('language', language)
   return request('/voice/stt', { method: 'POST', body: fd })
 }
@@ -205,4 +213,13 @@ export async function synthesizeSpeech(text, language = 'hi') {
     method: 'POST',
     body: JSON.stringify({ text, language })
   })
+}
+
+export const createSession = () => request('/sessions', { method: 'POST' })
+export const fetchCalendars = (limit = 50) => request(`/calendars?limit=${limit}`)
+export const updateProfile = (id, profile) => request(`/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(profile) })
+export function liveSocketUrl() {
+  const url = new URL(`${BASE.replace(/\/$/, '')}/ws/live`, window.location.href)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
 }

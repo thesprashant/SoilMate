@@ -3,7 +3,8 @@ import { Calendar, ShieldAlert, BookOpen, RefreshCw, ChevronRight, Sprout, Arrow
 import { fetchAdvisories, fetchAdvisoryDetail, deleteAdvisoryApi } from '../services/api'
 import { localizePlaceName, localizeCropName } from '../utils/geoLocalization'
 
-export default function AdvisoryHistory({ sessionId, t }) {
+export default function AdvisoryHistory({ sessionId, t, onOpen, onDelete }) {
+  const [error, setError] = useState('')
   const [advisories, setAdvisories] = useState([])
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState(null)
@@ -12,11 +13,12 @@ export default function AdvisoryHistory({ sessionId, t }) {
 
   const loadAdvisories = async () => {
     setLoading(true)
+    setError('')
     try {
-      const res = await fetchAdvisories()
+      const res = await fetchAdvisories({ sessionId })
       setAdvisories(res)
     } catch (e) {
-      console.error('Failed to load advisories:', e)
+      setError(e.message)
     } finally {
       setLoading(false)
     }
@@ -30,9 +32,10 @@ export default function AdvisoryHistory({ sessionId, t }) {
     setDetailLoading(true)
     try {
       const detail = await fetchAdvisoryDetail(id)
+      onOpen?.(detail)
       setSelected(detail)
     } catch (e) {
-      console.error('Failed to fetch detail:', e)
+      setError(e.message)
     } finally {
       setDetailLoading(false)
     }
@@ -46,6 +49,7 @@ export default function AdvisoryHistory({ sessionId, t }) {
     setDeletingId(id)
     try {
       await deleteAdvisoryApi(id)
+      onDelete?.(id)
       if (selected?.id === id) {
         setSelected(null)
       }
@@ -122,6 +126,7 @@ export default function AdvisoryHistory({ sessionId, t }) {
         </button>
       </div>
 
+      {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
       {loading && (
         <div className="p-6 text-center text-xs text-purple-300">
           <RefreshCw size={16} className="animate-spin mx-auto mb-2 text-purple-400" />
@@ -129,7 +134,7 @@ export default function AdvisoryHistory({ sessionId, t }) {
         </div>
       )}
 
-      {!loading && advisories.length === 0 && (
+      {!loading && !error && advisories.length === 0 && (
         <div className="p-6 text-center text-xs text-purple-300/70 bg-purple-950/30 rounded-xl border border-purple-500/20">
           <Sprout size={24} className="mx-auto mb-1 text-purple-400 opacity-60" />
           <p className="font-semibold text-white">{t?.historyNoAdvisoriesTitle || 'No saved crop advisories'}</p>
@@ -142,6 +147,7 @@ export default function AdvisoryHistory({ sessionId, t }) {
           {advisories.map((a) => (
             <div
               key={a.id}
+              role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') openDetail(a.id) }}
               onClick={() => openDetail(a.id)}
               className="w-full text-left p-3 flex items-center justify-between bg-dark-900/40 hover:bg-purple-950/40 transition cursor-pointer group"
             >

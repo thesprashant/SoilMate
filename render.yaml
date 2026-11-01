@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: soilmate
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_MODE
+        value: hosted
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: DATA_GOV_API_KEY
+        sync: false

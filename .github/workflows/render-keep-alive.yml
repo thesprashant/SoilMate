@@ -1,0 +1,26 @@
+name: Keep Render service awake
+
+on:
+  schedule:
+    - cron: '3-59/10 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping the Render health endpoint
+        env:
+          RENDER_URL: ${{ vars.RENDER_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RENDER_URL" =~ ^https://[a-zA-Z0-9-]+\.onrender\.com/?$ ]]; then
+            echo 'Set the RENDER_URL repository variable to your HTTPS onrender.com origin.' >&2
+            exit 1
+          fi
+          curl --fail --silent --show-error --retry 2 --retry-delay 5 --max-time 90 "${RENDER_URL%/}/api/health" > /dev/null
+          echo 'SoilMate health check succeeded.'

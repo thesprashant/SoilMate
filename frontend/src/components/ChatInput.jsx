@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { Send, Mic, MicOff, Loader2 } from 'lucide-react'
 import { uploadSpeechAudio } from '../services/api'
 import { stopCurrentAudio } from '../utils/audioManager'
@@ -10,6 +10,13 @@ export default function ChatInput({ onSendMessage, language, placeholder, disabl
 
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
+  const mounted = useRef(true)
+  const stopTimer = useRef(null)
+  useEffect(() => () => {
+    mounted.current = false; clearTimeout(stopTimer.current)
+    const recorder = mediaRecorderRef.current
+    if (recorder) { recorder.onstop = null; if (recorder.state !== 'inactive') recorder.stop(); recorder.stream.getTracks().forEach(t => t.stop()) }
+  }, [])
 
   const quickChips = [
     { icon: '🌱', text: t?.promptPlant || 'What should I plant this season?' },
@@ -32,6 +39,7 @@ export default function ChatInput({ onSendMessage, language, placeholder, disabl
     stopCurrentAudio()
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (!mounted.current) { stream.getTracks().forEach(t => t.stop()); return }
       mediaRecorderRef.current = new MediaRecorder(stream)
       audioChunksRef.current = []
 
@@ -42,10 +50,11 @@ export default function ChatInput({ onSendMessage, language, placeholder, disabl
       }
 
       mediaRecorderRef.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' })
+        const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorderRef.current.mimeType })
         setTranscribing(true)
         try {
           const res = await uploadSpeechAudio(audioBlob, language)
+          if (!mounted.current) return
           if (res.text) {
             onSendMessage(res.text)
           } else {
@@ -61,6 +70,8 @@ export default function ChatInput({ onSendMessage, language, placeholder, disabl
       }
 
       mediaRecorderRef.current.start()
+      clearTimeout(stopTimer.current)
+      stopTimer.current = setTimeout(() => { if (mediaRecorderRef.current?.state === 'recording') { mediaRecorderRef.current.stop(); setRecording(false) } }, 60000)
       setRecording(true)
     } catch (err) {
       console.error('Microphone access error:', err)

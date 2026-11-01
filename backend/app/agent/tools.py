@@ -7,6 +7,9 @@ from google.genai import types
 from app.services.weather import get_weather_forecast, geocode_location
 from app.services.soil import get_soil_properties
 from app.services.mandi import get_mandi_prices
+from app.services.references import crop_reference
+from app.models.schemas import LocationInput, ProfileUpdate
+from app.agent.advisories import schedule_decl
 
 # Define tool schemas for Gemini Function Calling
 weather_decl = types.FunctionDeclaration(
@@ -50,14 +53,15 @@ mandi_decl = types.FunctionDeclaration(
 
 crops_decl = types.FunctionDeclaration(
     name="query_crop_database",
-    description="Query ICAR crop agronomy database for crop suitability, sowing windows, water needs, and fertilizer recommendations.",
+    description="Fetch an official TNAU crop reference for wheat, rice/paddy or potato. Specify the crop. Regional applicability must be checked.",
     parameters=types.Schema(
         type="OBJECT",
         properties={
+            "crop": types.Schema(type="STRING", description="Crop name, required for official reference lookup"),
             "season": types.Schema(type="STRING", description="Farming season: 'kharif' (monsoon), 'rabi' (winter), or 'zaid' (summer)"),
             "soil_type": types.Schema(type="STRING", description="Soil texture type (e.g. 'Loamy', 'Sandy Loam', 'Clayey', 'Clay Loam')"),
             "state": types.Schema(type="STRING", description="Optional state name to filter regional crops")
-        }
+        }, required=["crop"]
     )
 )
 
@@ -103,7 +107,7 @@ profile_decl = types.FunctionDeclaration(
     )
 )
 
-AGENT_TOOLS = types.Tool(function_declarations=[
+AGENT_TOOLS = types.Tool(function_declarations=[schedule_decl,
     weather_decl,
     soil_decl,
     mandi_decl,
@@ -113,21 +117,11 @@ AGENT_TOOLS = types.Tool(function_declarations=[
     profile_decl
 ])
 
-# Load local datasets for reference tools
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-
-def load_crops_data() -> List[Dict[str, Any]]:
-    path = os.path.join(DATA_DIR, "crops.json")
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("crops", [])
+# Legacy unverified catalogs are intentionally not loaded.
+def load_crops_data():
     return []
 
-def load_schemes_data() -> List[Dict[str, Any]]:
-    path = os.path.join(DATA_DIR, "schemes.json")
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("schemes", [])
+def load_schemes_data():
     return []
 
 async def execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -135,14 +129,14 @@ async def execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     t0 = time.time()
     try:
         if name == "get_weather":
-            lat = float(args.get("latitude", 26.91))
-            lon = float(args.get("longitude", 75.79))
+            lat = LocationInput(lat=args["latitude"], lon=args["longitude"]).lat
+            lon = float(args["longitude"])
             res = await get_weather_forecast(lat, lon)
             return res
 
         elif name == "get_soil_data":
-            lat = float(args.get("latitude", 26.91))
-            lon = float(args.get("longitude", 75.79))
+            lat = LocationInput(lat=args["latitude"], lon=args["longitude"]).lat
+            lon = float(args["longitude"])
             res = await get_soil_properties(lat, lon)
             return res
 
@@ -153,98 +147,31 @@ async def execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             return res
 
         elif name == "query_crop_database":
-            season = args.get("season", "").lower().strip()
-            soil = args.get("soil_type", "").lower().strip()
-            state = args.get("state", "").lower().strip()
-
-            all_crops = load_crops_data()
-            matched = []
-            for c in all_crops:
-                # Filter by season if provided
-                if season and season not in c.get("season", "").lower():
-                    continue
-                # Filter by soil type if provided
-                if soil:
-                    soil_matches = any(soil in s.lower() for s in c.get("soil_types", []))
-                    if not soil_matches:
-                        continue
-                # Filter by state if provided
-                if state:
-                    state_matches = any(state in st.lower() for st in c.get("major_states", []))
-                    if not state_matches:
-                        continue
-                matched.append(c)
-
-            return {
-                "matched_crops": matched if matched else all_crops[:5],
-                "count": len(matched),
-                "season": season,
-                "soil_filter": soil
-            }
+            return await crop_reference(**args)
 
         elif name == "get_pest_and_disease_risk":
-            crop = str(args.get("crop", "")).capitalize()
-            temp = float(args.get("temp_max") or 30.0)
-            hum = float(args.get("humidity") or 70.0)
-            rain = float(args.get("rainfall") or 0.0)
-
-            risks = []
-            if hum >= 80.0 and (22.0 <= temp <= 32.0):
-                risks.append({
-                    "condition": "Fungal Blight / Blast",
-                    "severity": "High",
-                    "recommendation": "Avoid overhead sprinkler irrigation; spray prophylactic Copper Oxychloride (2.5 g/L) or Carbendazim (1 g/L) if lesions appear."
-                })
-            if rain >= 50.0:
-                risks.append({
-                    "condition": "Root Rot / Damping Off",
-                    "severity": "High",
-                    "recommendation": "Ensure zero standing water; dig field drainage ditches immediately."
-                })
-            if temp >= 35.0 and hum <= 50.0:
-                risks.append({
-                    "condition": "Sucking Pests (Whitefly, Thrips, Aphids)",
-                    "severity": "Medium",
-                    "recommendation": "Install yellow sticky traps (10 per acre); spray Neem oil (5ml/L) early in the morning."
-                })
-
-            if not risks:
-                risks.append({
-                    "condition": "Normal Seasonal Monitoring",
-                    "severity": "Low",
-                    "recommendation": "Inspect crop undersides weekly. No severe weather-driven pest outbreak detected."
-                })
-
-            return {
-                "crop": crop,
-                "conditions": {"temp": temp, "humidity": hum, "rain": rain},
-                "identified_risks": risks
-            }
+            return {"status": "unavailable", "error": "No validated crop-specific pest forecasting model is connected. Weather alone cannot diagnose an outbreak. Seek local extension advice; no pesticide dosage is inferred."}
 
         elif name == "get_government_schemes":
-            q = str(args.get("query", "")).lower().strip()
-            all_schemes = load_schemes_data()
-            if not q:
-                return {"schemes": all_schemes}
-            matched = [
-                s for s in all_schemes 
-                if q in s.get("name", "").lower() 
-                or q in s.get("description", "").lower() 
-                or q in s.get("benefits", "").lower()
-            ]
-            return {"schemes": matched if matched else all_schemes}
+            return {"status": "unavailable", "error": "Live eligibility verification is not connected. Consult the official scheme portal; no eligibility or benefit amounts are inferred.", "source": "https://www.myscheme.gov.in/"}
 
         elif name == "update_farmer_profile":
             loc = args.get("location_name")
             geocoded = None
             if loc:
                 geocoded = await geocode_location(loc)
+                if not geocoded:
+                    return {
+                        "status": "unavailable",
+                        "error": "Location could not be resolved. Ask for a more specific village, district, or coordinates. The saved location was not changed."
+                    }
 
             lat = geocoded["lat"] if geocoded else None
             lon = geocoded["lon"] if geocoded else None
             norm_name = geocoded["name"] if geocoded else loc
             state = geocoded.get("state") if (geocoded and geocoded.get("state")) else args.get("state")
 
+            ProfileUpdate(location_name=norm_name, latitude=lat, longitude=lon, land_size_acres=args.get("land_size_acres"), primary_crop=args.get("primary_crops"), soil_type=args.get("soil_type"))
             return {
                 "status": "profile_updated",
                 "location_name": norm_name,
@@ -262,5 +189,5 @@ async def execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             return {"error": f"Unknown tool '{name}'"}
 
     except Exception as e:
-        return {"error": f"Tool '{name}' execution failed: {str(e)}"}
+        return {"status": "unavailable", "error": f"Tool {name} failed ({type(e).__name__}). Check inputs or retry later."}
 

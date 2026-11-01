@@ -1,15 +1,27 @@
 import json
 import asyncio
 import logging
+import time
+from pathlib import Path
+from collections import deque
 from contextlib import asynccontextmanager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, WebSocket
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from app.security import owner, identity, new_identity, allowed_origins, validate_deployment
+from app.agent.turns import turn_guard, active
+from app.db.repository import create_or_update_session, patch_profile
+from app.models.schemas import ProfileUpdate
+from app.services.references import crop_reference
 
 from app.config import settings
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 from app.db.database import init_db
 from app.db.repository import (
     list_sessions,
@@ -48,6 +60,7 @@ from app.agent.orchestrator import run_agent_turn
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize SQLite tables on startup
+    validate_deployment()
     await init_db()
     yield
 
@@ -61,11 +74,78 @@ app = FastAPI(
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+request_times = {}
+
+@app.middleware("http")
+async def browser_scope(request: Request, call_next):
+    if settings.app_mode == "local" and request.client and request.client.host not in {"127.0.0.1", "::1", "localhost", "test", "testclient"}:
+        return JSONResponse({"detail": "Local demo accepts loopback clients only"}, status_code=403)
+    origin = request.headers.get("origin")
+    if origin and origin.rstrip("/") not in allowed_origins():
+        return JSONResponse({"detail": "Origin not allowed"}, status_code=403)
+    try:
+        content_length = int(request.headers.get("content-length", "0") or 0)
+    except ValueError:
+        return JSONResponse({"detail": "Invalid content length"}, status_code=400)
+    if content_length > 12 * 1024 * 1024:
+        return JSONResponse({"detail": "Upload too large"}, status_code=413)
+    if request.method in {"POST", "PATCH", "DELETE"}:
+        now = time.monotonic()
+        ip = request.client.host if request.client else "unknown"
+        for key in list(request_times):
+            if not request_times[key] or request_times[key][-1] < now - 60:
+                del request_times[key]
+        recent = request_times.setdefault(ip, deque())
+        while recent and recent[0] < now - 60:
+            recent.popleft()
+        if len(recent) >= 60 or len(request_times) > 5000:
+            return JSONResponse({"detail": "Too many requests; retry in a minute"}, status_code=429)
+        recent.append(now)
+    who = identity(request.cookies.get("soilmate_owner"))
+    cookie = None
+    if not who:
+        who, cookie = new_identity()
+    token = owner.set(who)
+    try:
+        response = await call_next(request)
+        if cookie:
+            response.set_cookie("soilmate_owner", cookie, httponly=True, secure=True, samesite="lax", max_age=2592000)
+        return response
+    finally:
+        owner.reset(token)
+
+
+async def require_session(session_id):
+    if session_id and not await get_session(session_id):
+        raise HTTPException(404, "Session not found")
+
+
+@app.post("/api/sessions", response_model=SessionSummary)
+async def new_session():
+    return await create_or_update_session()
+
+
+@app.patch("/api/sessions/{session_id}", response_model=SessionSummary)
+async def edit_profile(session_id: str, req: ProfileUpdate):
+    await require_session(session_id)
+    if (owner.get(), session_id) in active:
+        raise HTTPException(409, "End the current conversation before editing the profile")
+    values = req.model_dump(exclude_unset=True)
+    if "location_name" in values and not {"latitude", "longitude"}.issubset(values):
+        loc = await geocode_location(values["location_name"]) if values["location_name"] else None
+        if values["location_name"] and not loc:
+            raise HTTPException(422, "Location could not be resolved. Enter coordinates or use a more specific place name.")
+        values.update(latitude=loc["lat"] if loc else None, longitude=loc["lon"] if loc else None, state=loc.get("state") if loc else None)
+    if (values.get("latitude") is None) != (values.get("longitude") is None):
+        raise HTTPException(422, "Supply latitude and longitude together")
+    return await patch_profile(session_id, values)
+
 
 # ==========================================
 # SYSTEM & HEALTH
@@ -96,17 +176,14 @@ async def chat_endpoint(req: ChatRequest):
     Translates Indic query to English, autonomously calls tools, records trace,
     and returns localized response + TTS voice audio.
     """
-    try:
-        response = await run_agent_turn(
-            message=req.message,
-            session_id=req.session_id,
-            language_hint=req.language,
-            location=req.location,
-            voice_output=req.voice_output
-        )
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+    await require_session(req.session_id)
+    async with turn_guard(req.session_id, req.request_id):
+        try:
+            return await asyncio.wait_for(run_agent_turn(message=req.message, session_id=req.session_id, language_hint=req.language, location=req.location, voice_output=req.voice_output), 150)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "Analysis timed out. Review history before retrying.")
+        except Exception:
+            raise HTTPException(502, "Analysis could not be completed. Please retry later.")
 
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(req: ChatRequest):
@@ -115,49 +192,32 @@ async def chat_stream_endpoint(req: ChatRequest):
     Streams live progress notifications (e.g. 'Fetching live weather for Jaipur...',
     'Analyzing SoilGrids...', 'Translating to Telugu...') followed by the final completion event.
     """
-    queue: asyncio.Queue = asyncio.Queue()
-
-    async def on_progress(event: ProgressEvent):
-        await queue.put(event)
-
+    await require_session(req.session_id)
+    guard = turn_guard(req.session_id, req.request_id)
+    await guard.__aenter__()
+    queue = asyncio.Queue(maxsize=64)
+    async def on_progress(event):
+        if event.type != "complete":
+            await queue.put(event)
     async def event_generator():
-        # Start background agent turn
-        agent_task = asyncio.create_task(
-            run_agent_turn(
-                message=req.message,
-                session_id=req.session_id,
-                language_hint=req.language,
-                location=req.location,
-                voice_output=req.voice_output,
-                progress_callback=on_progress
-            )
-        )
-
-        while not agent_task.done() or not queue.empty():
-            try:
-                # Wait for next progress event with timeout
-                event: ProgressEvent = await asyncio.wait_for(queue.get(), timeout=0.1)
-                yield f"event: progress\ndata: {json.dumps(event.model_dump())}\n\n"
-            except asyncio.TimeoutError:
-                continue
-
-        # Check if agent task threw error
-        if agent_task.exception():
-            err_data = {"type": "error", "message": str(agent_task.exception())}
-            yield f"event: error\ndata: {json.dumps(err_data)}\n\n"
-        else:
-            final_res = agent_task.result()
-            yield f"event: complete\ndata: {json.dumps(final_res.model_dump())}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
+        task = asyncio.create_task(asyncio.wait_for(run_agent_turn(message=req.message, session_id=req.session_id, language_hint=req.language, location=req.location, voice_output=req.voice_output, progress_callback=on_progress), 150))
+        try:
+            while not task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=1)
+                    yield f"event: progress\ndata: {json.dumps(event.model_dump())}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+            result = task.result()
+            yield f"event: complete\ndata: {json.dumps(result.model_dump())}\n\n"
+        except Exception:
+            yield 'event: error\ndata: {"message":"Analysis failed or timed out. Review history before retrying."}\n\n'
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await guard.__aexit__(None, None, None)
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 # ==========================================
 # GEMINI MULTIMODAL LIVE WEBSOCKET
@@ -171,7 +231,16 @@ async def gemini_live_endpoint(websocket: WebSocket):
     Streams 16kHz PCM audio bidirectionally with sub-second latency,
     native emotional voice synthesis, real-time barge-in, and autonomous tool calling.
     """
-    await handle_gemini_live_websocket(websocket)
+    origin = websocket.headers.get("origin")
+    who = identity(websocket.cookies.get("soilmate_owner"))
+    if not who or (origin and origin.rstrip("/") not in allowed_origins()) or (settings.app_mode == "local" and websocket.client.host not in {"127.0.0.1", "::1", "localhost", "testclient"}):
+        await websocket.close(code=1008)
+        return
+    token = owner.set(who)
+    try:
+        await handle_gemini_live_websocket(websocket)
+    finally:
+        owner.reset(token)
 
 
 # ==========================================
@@ -195,12 +264,15 @@ async def get_session_by_id(session_id: str):
 @app.get("/api/chat/history/{session_id}", response_model=List[MessageRecord])
 async def get_chat_history(session_id: str):
     """Retrieve full chronological chat history with tool execution traces."""
+    await require_session(session_id)
     msgs = await get_session_messages(session_id)
     return [MessageRecord(**m) for m in msgs]
 
 @app.delete("/api/sessions/{session_id}")
 async def remove_session(session_id: str):
     """Delete a conversation session, cascading to its messages and related advisories."""
+    if (owner.get(), session_id) in active:
+        raise HTTPException(409, "End the current conversation before deleting it")
     success = await delete_session(session_id)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -219,6 +291,12 @@ async def get_advisories(
     """List saved crop protective advisories and planting schedules."""
     advs = await list_advisories(session_id=session_id, crop_name=crop, limit=limit)
     return [AdvisorySummary(**a) for a in advs]
+
+@app.get("/api/calendars", response_model=List[AdvisoryDetail])
+async def get_calendars(limit: int = Query(50, ge=1, le=100)):
+    """List saved agent-generated calendars, newest first, for the current owner."""
+    return await list_advisories(limit=limit, calendars_only=True)
+
 
 @app.get("/api/advisories/{advisory_id}", response_model=AdvisoryDetail)
 async def get_advisory_by_id(advisory_id: str):
@@ -247,7 +325,9 @@ async def stt_endpoint(
     language: Optional[str] = Form(None)
 ):
     """Transcribe speech audio file to text."""
-    audio_bytes = await file.read()
+    audio_bytes = await file.read(10 * 1024 * 1024 + 1)
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(413, "Audio must be under 10 MB")
     res = await speech_to_text(audio_bytes, filename=file.filename or "audio.wav", language_hint=language)
     if "error" in res and not res.get("text"):
         raise HTTPException(status_code=502, detail=res["error"])
@@ -266,22 +346,26 @@ async def tts_endpoint(req: TTSRequest):
 # ==========================================
 
 @app.get("/api/weather", response_model=WeatherResponse)
-async def weather_endpoint(lat: float = Query(...), lon: float = Query(...)):
+async def weather_endpoint(lat: float = Query(..., ge=-90, le=90), lon: float = Query(..., ge=-180, le=180)):
     """Get live 7-day agricultural weather forecast and alerts."""
     try:
         data = await get_weather_forecast(lat, lon)
         return WeatherResponse(**data)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Open-Meteo query failed: {str(e)}")
+    except Exception:
+        logger.exception("Open-Meteo query failed")
+        raise HTTPException(status_code=502, detail="Weather provider is unavailable or returned invalid data")
 
 @app.get("/api/soil", response_model=SoilResponse)
-async def soil_endpoint(lat: float = Query(...), lon: float = Query(...)):
+async def soil_endpoint(lat: float = Query(..., ge=-90, le=90), lon: float = Query(..., ge=-180, le=180)):
     """Get live SoilGrids physical and chemical soil properties."""
     try:
         data = await get_soil_properties(lat, lon)
+        if data.get("error"):
+            return JSONResponse(data, status_code=503)
         return SoilResponse(**data)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"SoilGrids query failed: {str(e)}")
+    except Exception:
+        logger.exception("SoilGrids query failed")
+        raise HTTPException(status_code=502, detail="Soil provider is unavailable or returned invalid data")
 
 @app.get("/api/mandi", response_model=MandiResponse)
 async def mandi_endpoint(state: str = Query(""), commodity: str = Query(...)):
@@ -289,8 +373,9 @@ async def mandi_endpoint(state: str = Query(""), commodity: str = Query(...)):
     try:
         data = await get_mandi_prices(state, commodity)
         return MandiResponse(**data)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Mandi price fetch failed: {str(e)}")
+    except Exception:
+        logger.exception("Mandi price fetch failed")
+        raise HTTPException(status_code=502, detail="Mandi provider is unavailable or returned invalid data")
 
 @app.get("/api/geocode", response_model=GeocodeResponse)
 async def geocode_endpoint(query: str = Query(...)):
@@ -301,29 +386,15 @@ async def geocode_endpoint(query: str = Query(...)):
     return GeocodeResponse(**loc)
 
 @app.get("/api/crops")
-async def crops_catalog(season: Optional[str] = None, soil_type: Optional[str] = None):
-    """Query ICAR reference crop catalog."""
-    crops = load_crops_data()
-    filtered = []
-    for c in crops:
-        if season and season.lower() not in c.get("season", "").lower():
-            continue
-        if soil_type and not any(soil_type.lower() in s.lower() for s in c.get("soil_types", [])):
-            continue
-        filtered.append(c)
-    return {"crops": filtered, "total": len(filtered)}
+async def crops_catalog(crop: str = ""):
+    return await crop_reference(crop)
 
 @app.get("/api/schemes")
-async def schemes_catalog(query: Optional[str] = None):
-    """Query government agricultural welfare schemes."""
-    schemes = load_schemes_data()
-    if query:
-        q = query.lower().strip()
-        schemes = [
-            s for s in schemes 
-            if q in s.get("name", "").lower() 
-            or q in s.get("description", "").lower() 
-            or q in s.get("benefits", "").lower()
-        ]
-    return {"schemes": schemes, "total": len(schemes)}
+async def schemes_catalog():
+    return {"status": "unavailable", "schemes": [], "total": 0, "note": "Live eligibility verification is not connected.", "source": "https://www.myscheme.gov.in/"}
 
+
+# The Render image includes the built frontend. Local development uses Vite.
+frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")

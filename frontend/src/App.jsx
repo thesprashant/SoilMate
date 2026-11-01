@@ -1,182 +1,115 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import ChatPanel from './components/ChatPanel'
 import DashboardPanel from './components/DashboardPanel'
-import { fetchChatHistory, fetchSessionDetail, fetchAdvisoryDetail } from './services/api'
+import { createSession, fetchChatHistory, fetchSessionDetail, fetchAdvisoryDetail, fetchAdvisories, fetchCalendars, updateProfile } from './services/api'
 import { stopCurrentAudio } from './utils/audioManager'
-
+const remembered = key => { try { return localStorage.getItem(key) || 'hi' } catch { return 'hi' } }
 export default function App() {
-  // 1. UI Language: persistent in localStorage, defaults to 'hi'
-  const [uiLanguage, setUiLanguageState] = useState(() => {
-    try {
-      return localStorage.getItem('soilmate_ui_lang') || 'hi'
-    } catch (_) {
-      return 'hi'
-    }
-  })
-
-  // 2. Spoken Language: language spoken or typed by farmer for chat, voice TTS & agronomic advice.
-  const [spokenLanguage, setSpokenLanguageState] = useState(() => {
-    try {
-      return localStorage.getItem('soilmate_spoken_lang') || 'hi'
-    } catch (_) {
-      return 'hi'
-    }
-  })
-
-  // User explicitly selects UI Language from top dropdown
-  const handleUiLanguageChange = (newLang) => {
-    setUiLanguageState(newLang)
-    try {
-      localStorage.setItem('soilmate_ui_lang', newLang)
-    } catch (_) {}
-    // Seamless voice readiness: synchronize listening model with chosen UI language
-    setSpokenLanguageState(newLang)
-    try {
-      localStorage.setItem('soilmate_spoken_lang', newLang)
-    } catch (_) {}
-  }
-
-  // System dynamically detects spoken or typed language from conversation
-  const handleSpokenLanguageChange = (detectedLang) => {
-    if (detectedLang && detectedLang !== spokenLanguage) {
-      setSpokenLanguageState(detectedLang)
-      try {
-        localStorage.setItem('soilmate_spoken_lang', detectedLang)
-      } catch (_) {}
-    }
-  }
-
-  // Zero mock location: starts as null, populated only when added by user or detected by agent
+  const [uiLanguage, setUiLanguage] = useState(() => remembered('soilmate_ui_lang'))
+  const [spokenLanguage, setSpokenLanguage] = useState(() => remembered('soilmate_spoken_lang'))
   const [location, setLocation] = useState(null)
   const [farmerProfile, setFarmerProfile] = useState(null)
-
   const [sessionId, setSessionId] = useState(null)
   const [messages, setMessages] = useState([])
   const [streamingEvent, setStreamingEvent] = useState(null)
-
-  // 5 Tabs: 'workflow' (default) -> switches to 'advice'/'schedule'/'profile' -> back to 'workflow' on talk
-  const [activeTab, setActiveTab] = useState('workflow')
+  const [liveTraces, setLiveTraces] = useState([])
+  const [activeTab, setActiveTab] = useState('advice')
+  const [chatWidth, setChatWidth] = useState(38)
+  const layoutRef = useRef(null)
   const [latestAdvisory, setLatestAdvisory] = useState(null)
-
-  // Find latest assistant message and tool calls
-  const assistantMessages = messages.filter((m) => m.role === 'assistant')
-  const latestAssistantMessage = assistantMessages[assistantMessages.length - 1] || null
-  const latestToolCalls = latestAssistantMessage?.tool_calls || []
-
-  // Automatic tab switching based on talk & output
-  useEffect(() => {
-    if (latestAssistantMessage?.advisory_id) {
-      fetchAdvisoryDetail(latestAssistantMessage.advisory_id)
-        .then((adv) => {
-          if (adv) {
-            setLatestAdvisory(adv)
-            setActiveTab('advice')
-          }
-        })
-        .catch(() => {})
-    } else if (latestAssistantMessage?.tool_calls?.some(t => t.tool === 'query_crop_database')) {
-      setActiveTab('advice')
-    } else if (latestAssistantMessage?.tool_calls?.some(t => t.tool === 'update_farmer_profile')) {
-      setActiveTab('profile')
-    } else if (
-      latestAssistantMessage?.content &&
-      (latestAssistantMessage.content.toLowerCase().includes('schedule') ||
-       latestAssistantMessage.content.toLowerCase().includes('sowing') ||
-       latestAssistantMessage.content.includes('बुवाई') ||
-       latestAssistantMessage.content.includes('कटाई'))
-    ) {
-      setActiveTab('schedule')
-    }
-  }, [latestAssistantMessage])
-
-  // When user begins talking or messaging again, automatically flip back to 'workflow'
-  const handleUserActivity = () => {
-    setActiveTab('workflow')
+  const [latestCalendar, setLatestCalendar] = useState(null)
+  const [calendarError, setCalendarError] = useState('')
+  const [calendarRevision, setCalendarRevision] = useState(0)
+  const [generation, setGeneration] = useState(0)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const version = useRef(0)
+  const pendingSession = useRef(null)
+  const latestAssistantMessage = [...messages].reverse().find(m => m.role === 'assistant')
+  const latestToolCalls = liveTraces.length ? liveTraces : latestAssistantMessage?.tool_calls || []
+  useEffect(() => { try { localStorage.setItem('soilmate_ui_lang', uiLanguage); localStorage.setItem('soilmate_spoken_lang', spokenLanguage) } catch {} }, [uiLanguage, spokenLanguage])
+  const applyProfile = profile => {
+    setFarmerProfile(profile)
+    setLocation(profile?.latitude != null && profile?.longitude != null ? { name: profile.location_name, lat: profile.latitude, lon: profile.longitude, state: profile.state } : null)
   }
-
-  // Create a brand new session from frontend
-  const handleNewSession = () => {
-    stopCurrentAudio()
-    setSessionId(null)
-    setMessages([])
-    setStreamingEvent(null)
-    setLatestAdvisory(null)
-    setFarmerProfile(null)
-    setActiveTab('workflow')
+  const reset = () => {
+    stopCurrentAudio(); version.current += 1; pendingSession.current = null
+    setGeneration(version.current); setSessionId(null); setMessages([]); setStreamingEvent(null); setLiveTraces([])
+    setLatestAdvisory(null); applyProfile(null); setError(''); setLoading(false); setActiveTab('advice')
   }
-
-  // Load chat history & remembered farmer profile when a previous session is selected
-  const handleSelectSession = async (sid) => {
-    if (!sid) return
-    setSessionId(sid)
+  const ensureSession = async () => {
+    if (sessionId) return sessionId
+    const current = version.current
+    if (!pendingSession.current) pendingSession.current = createSession()
     try {
-      const [history, sess] = await Promise.all([
-        fetchChatHistory(sid),
-        fetchSessionDetail(sid).catch(() => null)
-      ])
-      setMessages(history)
-      if (sess) {
-        if (sess.language) handleSpokenLanguageChange(sess.language)
-        setFarmerProfile({
-          location_name: sess.location_name,
-          latitude: sess.latitude,
-          longitude: sess.longitude,
-          state: sess.state,
-          district: sess.district,
-          land_size_acres: sess.land_size_acres,
-          primary_crop: sess.primary_crop,
-          soil_type: sess.soil_type
-        })
-        if (sess.location_name && sess.latitude != null && sess.longitude != null) {
-          setLocation({
-            name: sess.location_name,
-            lat: sess.latitude,
-            lon: sess.longitude,
-            state: sess.state || ''
-          })
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load session history:', e)
-    }
+      const sess = await pendingSession.current
+      if (version.current !== current) throw new DOMException('Session changed', 'AbortError')
+      setSessionId(sess.id); return sess.id
+    } finally { if (version.current === current) pendingSession.current = null }
   }
-
-  return (
-    <div className="flex h-screen w-screen overflow-hidden bg-dark-950 font-sans text-stone-100 antialiased select-none">
-      {/* Left: Push-to-Talk Voice & Interaction Panel with Chat Overlay */}
-      <ChatPanel
-        uiLanguage={uiLanguage}
-        setUiLanguage={handleUiLanguageChange}
-        spokenLanguage={spokenLanguage}
-        setSpokenLanguage={handleSpokenLanguageChange}
-        location={location}
-        setLocation={setLocation}
-        sessionId={sessionId}
-        setSessionId={setSessionId}
-        messages={messages}
-        setMessages={setMessages}
-        onUserActivity={handleUserActivity}
-        onNewSession={handleNewSession}
-        streamingEvent={streamingEvent}
-        setStreamingEvent={setStreamingEvent}
-        setFarmerProfile={setFarmerProfile}
-      />
-
-      {/* Right: Rounded Box Tabs (Workflow, Advice, Schedule, Profile, History) */}
-      <DashboardPanel
-        location={location}
-        uiLanguage={uiLanguage}
-        activeSessionId={sessionId}
-        onSelectSession={handleSelectSession}
-        onNewSession={handleNewSession}
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        latestToolCalls={latestToolCalls}
-        streamingEvent={streamingEvent}
-        latestAdvisory={latestAdvisory}
-        latestAssistantMessage={latestAssistantMessage}
-        farmerProfile={farmerProfile}
-      />
+  const selectSession = async sid => {
+    reset(); const current = version.current; setLoading(true)
+    try {
+      const [history, profile, advisories] = await Promise.all([fetchChatHistory(sid), fetchSessionDetail(sid), fetchAdvisories({ sessionId: sid, limit: 1 })])
+      if (current !== version.current) return
+      setSessionId(sid); setMessages(history); applyProfile(profile)
+      if (profile.language) setSpokenLanguage(profile.language)
+      if (advisories[0]) {
+        const detail = await fetchAdvisoryDetail(advisories[0].id)
+        if (current === version.current) setLatestAdvisory(detail)
+      }
+    } catch (e) { if (current === version.current) setError(e.message) }
+    finally { if (current === version.current) setLoading(false) }
+  }
+  const saveProfile = async values => {
+    const current = version.current
+    const sid = await ensureSession()
+    const profile = await updateProfile(sid, values)
+    if (current === version.current) { applyProfile(profile); if (profile.language) setSpokenLanguage(profile.language) }
+  }
+  useEffect(() => {
+    const id = latestAssistantMessage?.advisory_id
+    if (!id) return
+    let cancelled = false
+    fetchAdvisoryDetail(id).then(advice => { if (!cancelled) setLatestAdvisory(advice) }).catch(e => { if (!cancelled) setError(e.message) })
+    return () => { cancelled = true }
+  }, [latestAssistantMessage?.advisory_id, generation])
+  useEffect(() => {
+    let cancelled = false
+    fetchCalendars(1).then(items => { if (!cancelled) { setLatestCalendar(items[0] || null); setCalendarError('') } })
+      .catch(e => { if (!cancelled) setCalendarError(e.message) })
+    return () => { cancelled = true }
+  }, [latestAssistantMessage?.advisory_id, generation, calendarRevision])
+  const resize = clientX => {
+    const rect = layoutRef.current?.getBoundingClientRect()
+    if (rect) setChatWidth(Math.min(70, Math.max(25, ((clientX - rect.left) / rect.width) * 100)))
+  }
+  const startResize = event => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    resize(event.clientX)
+  }
+  return <div ref={layoutRef} className="flex flex-col lg:flex-row min-h-screen lg:h-screen w-full lg:overflow-hidden bg-dark-950 font-sans text-stone-100">
+    <div className="w-full lg:w-[var(--chat-width)] lg:h-full lg:shrink-0" style={{ '--chat-width': `${chatWidth}%` }}>
+    <ChatPanel key={generation} uiLanguage={uiLanguage} setUiLanguage={v => { setUiLanguage(v); setSpokenLanguage(v) }} spokenLanguage={spokenLanguage} setSpokenLanguage={setSpokenLanguage}
+      location={location} setLocation={setLocation} sessionId={sessionId} setSessionId={setSessionId} ensureSession={ensureSession}
+      messages={messages} setMessages={setMessages} onUserActivity={() => setLiveTraces([])} onNewSession={reset}
+      streamingEvent={streamingEvent} setStreamingEvent={setStreamingEvent} setFarmerProfile={applyProfile} liveTraces={liveTraces} setLiveTraces={setLiveTraces} disabled={loading} />
     </div>
-  )
+    <div role="separator" aria-label="Resize chat panel" aria-orientation="vertical" aria-valuemin={25} aria-valuemax={70} aria-valuenow={Math.round(chatWidth)} tabIndex={0}
+      onPointerDown={startResize} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) resize(event.clientX) }}
+      onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setChatWidth(width => Math.min(70, Math.max(25, width + (event.key === 'ArrowRight' ? 2 : -2)))) } }}
+      className="hidden lg:flex w-2 shrink-0 cursor-col-resize touch-none items-center justify-center bg-purple-950/40 hover:bg-purple-700/60 focus:bg-purple-700/60" >
+      <span className="h-12 w-0.5 rounded bg-purple-400/60" />
+    </div>
+    <div className="flex flex-col flex-1 min-w-0 min-h-[60vh] lg:min-h-0">
+      {error && <div role="alert" className="p-3 text-sm text-red-200">{error} <button onClick={() => setError('')}>Dismiss</button></div>}
+      {loading && <p role="status" className="p-3">Loading conversation?</p>}
+      <DashboardPanel key={generation} location={location} uiLanguage={uiLanguage} activeSessionId={sessionId} onSelectSession={selectSession} onNewSession={reset}
+        activeTab={activeTab} setActiveTab={setActiveTab} latestToolCalls={latestToolCalls} streamingEvent={streamingEvent} latestAdvisory={latestAdvisory}
+        latestCalendar={latestCalendar} calendarError={calendarError} calendarRevision={calendarRevision} calendarDraft={liveTraces.findLast?.(trace => trace.tool === 'record_crop_schedule' && ['success', 'partial'].includes(trace.outputs?.status))?.outputs}
+        latestAssistantMessage={latestAssistantMessage} farmerProfile={farmerProfile} onSaveProfile={saveProfile}
+        onOpenAdvisory={adv => { setLatestAdvisory(adv); setActiveTab('advice') }} onDeleteAdvisory={id => { if (latestAdvisory?.id === id) setLatestAdvisory(null); setCalendarRevision(value => value + 1) }} />
+    </div>
+  </div>
 }

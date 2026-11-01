@@ -64,8 +64,8 @@ CREATE INDEX IF NOT EXISTS idx_advisories_crop ON advisories(crop_name);
 async def get_db_connection() -> aiosqlite.Connection:
     """Open an async connection to SQLite with row-factory enabled."""
     db_file = settings.db_path
-    os.makedirs(os.path.dirname(db_file), exist_ok=True)
-    conn = await aiosqlite.connect(db_file)
+    os.makedirs(os.path.dirname(os.path.abspath(db_file)), exist_ok=True)
+    conn = await aiosqlite.connect(db_file, timeout=15)
     conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA foreign_keys = ON;")
     return conn
@@ -77,6 +77,7 @@ async def init_db() -> None:
         await conn.executescript(CREATE_TABLES_SQL)
         # Migrate columns for existing database files safely
         columns_to_ensure = [
+            ("owner_id", "TEXT NOT NULL DEFAULT 'local-demo'"),
             ("state", "TEXT"),
             ("district", "TEXT"),
             ("land_size_acres", "REAL"),
@@ -84,12 +85,13 @@ async def init_db() -> None:
             ("soil_type", "TEXT"),
             ("profile_data", "TEXT")
         ]
-        for col_name, col_type in columns_to_ensure:
-            try:
-                await conn.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_type};")
-            except Exception:
-                pass
+        for table, columns in [("sessions", columns_to_ensure), ("messages", [("advisory_id", "TEXT")]), ("advisories", [("evidence", "TEXT")])]:
+            cursor = await conn.execute(f"PRAGMA table_info({table})")
+            existing = {row["name"] for row in await cursor.fetchall()}
+            for name, kind in columns:
+                if name not in existing:
+                    await conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+        await conn.execute("UPDATE advisories SET evidence = '{}' WHERE evidence IS NULL")
         await conn.commit()
     finally:
         await conn.close()
-

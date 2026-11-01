@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings(BaseModel):
+    app_mode: str = Field(default_factory=lambda: os.getenv("APP_MODE", "local"))
+    session_secret: str = Field(default_factory=lambda: os.getenv("SESSION_SECRET", ""))
     # Gemini API keys pool (split comma-separated keys)
     gemini_api_keys_raw: str = Field(
         default_factory=lambda: (os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY") or "").strip()
@@ -26,7 +28,7 @@ class Settings(BaseModel):
     )
     data_gov_api_key: str = Field(default_factory=lambda: (os.getenv("DATA_GOV_API_KEY") or "").strip())
     data_gov_resource_id: str = Field(
-        default_factory=lambda: (os.getenv("DATA_GOV_RESOURCE_ID") or "9ef84268-d588-465a-a308-a864a43d0070").strip()
+        default_factory=lambda: (os.getenv("DATA_GOV_RESOURCE_ID") or "35985678-0d79-46b4-9ed6-6f13308a1d24").strip()
     )
     
     db_path: str = Field(
@@ -37,7 +39,7 @@ class Settings(BaseModel):
     )
     
     port: int = Field(default_factory=lambda: int(os.getenv("PORT", "8000")))
-    frontend_url: str = Field(default_factory=lambda: os.getenv("FRONTEND_URL", "http://localhost:5173"))
+    frontend_url: str = Field(default_factory=lambda: os.getenv("FRONTEND_URL") or os.getenv("RENDER_EXTERNAL_URL") or "http://localhost:5173")
     log_level: str = Field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
     @property

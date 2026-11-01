@@ -1,5 +1,9 @@
 from typing import Dict, Any, List, Optional
+import logging
 import httpx
+from app.services.references import timestamp
+
+logger = logging.getLogger(__name__)
 
 async def geocode_location(query: str) -> Optional[Dict[str, Any]]:
     """Convert city/village/district name to coordinates using Open-Meteo Geocoding API."""
@@ -28,8 +32,8 @@ async def geocode_location(query: str) -> Optional[Dict[str, Any]]:
                         "state": r.get("admin1"),
                         "country": r.get("country")
                     }
-        except Exception as e:
-            print(f"[geocode_location] error: {e}")
+        except (httpx.HTTPError, ValueError, TypeError, KeyError):
+            logger.warning("Geocoding provider unavailable or returned invalid data")
     return None
 
 def compute_weather_alerts(daily: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -60,7 +64,7 @@ def compute_weather_alerts(daily: Dict[str, Any]) -> List[Dict[str, Any]]:
             alerts.append({
                 "date": date,
                 "type": "FROST_WARNING",
-                "message": f"Near-freezing temperature ({t_min}°C). Protect sensitive seedlings with thatch cover or smoke screens.",
+                "message": f"Near-freezing temperature ({t_min}°C). Check local extension guidance for protecting sensitive seedlings.",
                 "severity": "high"
             })
 
@@ -124,6 +128,8 @@ async def get_weather_forecast(lat: float, lon: float) -> Dict[str, Any]:
         "location": {"lat": lat, "lon": lon},
         "current": data.get("current", {}),
         "daily": daily,
-        "alerts": alerts
+        "alerts": alerts,
+        "source": url, "retrieved_at": timestamp(), "data_kind": "weather_model_forecast",
+        "note": "Seven-day model forecast; alerts are heuristic weather thresholds, not official crop diagnoses."
     }
 

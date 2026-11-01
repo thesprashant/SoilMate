@@ -19,10 +19,8 @@ async def test_crops_catalog_endpoint():
         resp = await client.get("/api/crops?season=rabi")
         assert resp.status_code == 200
         data = resp.json()
-        assert "crops" in data
-        assert data["total"] > 0
-        for crop in data["crops"]:
-            assert "rabi" in crop["season"].lower()
+        assert data["status"] == "unavailable"
+        assert "supported_crops" in data
 
 @pytest.mark.asyncio
 async def test_schemes_endpoint():
@@ -32,7 +30,8 @@ async def test_schemes_endpoint():
         assert resp.status_code == 200
         data = resp.json()
         assert "schemes" in data
-        assert any("pm-kisan" in s["name"].lower() for s in data["schemes"])
+        assert data["status"] == "unavailable"
+        assert data["schemes"] == []
 
 @pytest.mark.asyncio
 async def test_sessions_and_history_endpoints():

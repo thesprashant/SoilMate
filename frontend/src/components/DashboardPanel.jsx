@@ -14,6 +14,7 @@ import AgentTraceView from './AgentTraceView'
 import LiveProgressTicker from './LiveProgressTicker'
 import AdvisoryHistory from './AdvisoryHistory'
 import SessionHistory from './SessionHistory'
+import CalendarHistory from './CalendarHistory'
 import { getUITranslations } from '../utils/translations'
 
 export default function DashboardPanel({
@@ -27,20 +28,26 @@ export default function DashboardPanel({
   latestToolCalls,
   streamingEvent,
   latestAdvisory,
+  latestCalendar,
+  calendarError,
+  calendarRevision,
+  calendarDraft,
   latestAssistantMessage,
-  farmerProfile
+  farmerProfile,
+  onSaveProfile,
+  onOpenAdvisory,
+  onDeleteAdvisory
 }) {
   const t = getUITranslations(uiLanguage)
 
   const TABS = [
-    { id: 'workflow', label: t.tabWorkflow, icon: Activity },
     { id: 'advice', label: t.tabAdvice, icon: ShieldCheck },
     { id: 'schedule', label: t.tabSchedule, icon: Calendar },
     { id: 'profile', label: t.tabProfile, icon: User },
     { id: 'history', label: t.tabHistory, icon: History }
   ]
   return (
-    <main className="flex-1 flex flex-col h-full overflow-hidden bg-dark-950/70 p-3 sm:p-5 lg:p-6 space-y-4">
+    <main className="flex-1 min-w-0 flex flex-col lg:h-full lg:overflow-hidden bg-dark-950/70 p-3 sm:p-5 lg:p-6 space-y-4">
       {/* 5 Tabs Floating Rounded Box with Shadows */}
       <div className="rounded-2xl border border-purple-500/25 bg-dark-900/80 p-1.5 shadow-[0_12px_36px_rgba(0,0,0,0.55)] backdrop-blur-xl shrink-0 flex items-center gap-1.5 overflow-x-auto scrollbar-none">
         {TABS.map((tab) => {
@@ -49,6 +56,7 @@ export default function DashboardPanel({
           return (
             <button
               key={tab.id}
+              aria-pressed={isActive}
               onClick={() => setActiveTab(tab.id)}
               className={`flex-1 min-w-[130px] flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
                 isActive
@@ -97,21 +105,21 @@ export default function DashboardPanel({
                 <div>
                   <h3 className="text-base font-bold text-white">{t.workflowTitle || 'Agent Workflow Live Monitor'}</h3>
                   <p className="text-xs text-purple-300/70 max-w-md mx-auto mt-1 leading-relaxed">
-                    {t.workflowDesc || 'SoilMate uses an English Reasoning Core with Google Gemini 2.0 Flash and dynamic ReAct function calling. When you ask a question, live tool calls (Weather, SoilGrids, Mandi prices, ICAR crops) will stream here in real time.'}
+                    Tool activity appears here when SoilMate retrieves data. Expand a result to inspect its source, timestamps and any missing information.
                   </p>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 max-w-lg mx-auto text-left text-xs pt-2">
                   <div className="p-3 rounded-xl bg-purple-950/30 border border-purple-500/15">
                     <span className="text-[10px] font-bold text-purple-400 uppercase block">{t.workflowStep1Title || '1. Ingestion'}</span>
-                    <p className="text-purple-200 mt-0.5">{t.workflowStep1Desc || 'Indic speech or text standardized to English core.'}</p>
+                    <p className="text-purple-200 mt-0.5">Speech transcription or typed question.</p>
                   </div>
                   <div className="p-3 rounded-xl bg-purple-950/30 border border-purple-500/15">
                     <span className="text-[10px] font-bold text-cyan-400 uppercase block">{t.workflowStep2Title || '2. Dynamic Tools'}</span>
-                    <p className="text-purple-200 mt-0.5">{t.workflowStep2Desc || 'Real APIs queried on-demand with zero mock data.'}</p>
+                    <p className="text-purple-200 mt-0.5">Weather, soil estimates, prices and official references, with explicit failure states.</p>
                   </div>
                   <div className="p-3 rounded-xl bg-purple-950/30 border border-purple-500/15">
                     <span className="text-[10px] font-bold text-emerald-400 uppercase block">{t.workflowStep3Title || '3. Localized Output'}</span>
-                    <p className="text-purple-200 mt-0.5">{t.workflowStep3Desc || 'Advice translated back to farmer\'s native tongue + audio TTS.'}</p>
+                    <p className="text-purple-200 mt-0.5">Response in your conversation language, with saved evidence.</p>
                   </div>
                 </div>
               </div>
@@ -131,7 +139,10 @@ export default function DashboardPanel({
         {/* 3. PLANTING SCHEDULE */}
         {activeTab === 'schedule' && (
           <SchedulePanel
-            advisory={latestAdvisory}
+            advisory={calendarDraft ? { crop_name: calendarDraft.crop, evidence: { schedule: calendarDraft.entries } } : latestCalendar}
+            error={calendarError}
+            sessionId={activeSessionId}
+            language={uiLanguage}
             t={t}
           />
         )}
@@ -143,6 +154,7 @@ export default function DashboardPanel({
             language={uiLanguage}
             sessionId={activeSessionId}
             farmerProfile={farmerProfile}
+            onSave={onSaveProfile}
             t={t}
           />
         )}
@@ -150,7 +162,8 @@ export default function DashboardPanel({
         {/* 5. HISTORY */}
         {activeTab === 'history' && (
           <div className="space-y-5">
-            <AdvisoryHistory sessionId={activeSessionId} t={t} />
+            <CalendarHistory language={uiLanguage} t={t} revision={calendarRevision} />
+            <AdvisoryHistory sessionId={activeSessionId} t={t} onOpen={onOpenAdvisory} onDelete={onDeleteAdvisory} />
             <SessionHistory
               activeSessionId={activeSessionId}
               onSelectSession={onSelectSession}

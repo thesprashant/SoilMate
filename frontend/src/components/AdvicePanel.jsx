@@ -46,6 +46,7 @@ export default function AdvicePanel({ advisory, latestAssistantMessage, t }) {
           </div>
         </div>
 
+
         {/* Dynamic Protective Alerts if available */}
         {alerts.length > 0 && (
           <div className="rounded-2xl border border-amber-500/30 bg-amber-950/30 p-4 shadow-glass space-y-2">

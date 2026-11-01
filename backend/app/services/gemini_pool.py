@@ -19,7 +19,7 @@ class GeminiKeyManager:
         self.failure_counts: Dict[str, int] = {k: 0 for k in self.keys}
         
         if not self.keys:
-            logger.warning("[GeminiKeyManager] No Gemini API keys configured! Agent will run in simulated mode.")
+            logger.warning("[GeminiKeyManager] No Gemini API keys configured! Agent calls will return an unavailable error.")
 
     @property
     def total_keys(self) -> int:
@@ -50,7 +50,7 @@ class GeminiKeyManager:
         active_key = key or self.get_active_key()
         if not active_key:
             return None
-        return genai.Client(api_key=active_key)
+        return genai.Client(api_key=active_key, http_options=types.HttpOptions(timeout=30000))
 
     async def generate_with_fallback(
         self,
@@ -68,7 +68,7 @@ class GeminiKeyManager:
 
         # Candidate models to try in case of 503 high-demand spike on a specific model
         candidate_models = [model]
-        for fallback in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"]:
+        for fallback in ["gemini-2.5-flash"]:
             if fallback not in candidate_models:
                 candidate_models.append(fallback)
 
@@ -85,18 +85,13 @@ class GeminiKeyManager:
             current_model = candidate_models[attempt % len(candidate_models)]
 
             try:
-                loop = asyncio.get_running_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: client.models.generate_content(
-                        model=current_model,
-                        contents=contents,
-                        config=config
-                    )
-                )
+                async with client.aio as async_client:
+                    response = await asyncio.wait_for(async_client.models.generate_content(model=current_model, contents=contents, config=config), 35)
                 return response
             except Exception as e:
                 err_str = str(e)
+                for secret in self.keys:
+                    err_str = err_str.replace(secret, "[redacted]")
                 last_exception = e
                 is_rate_limit = (
                     "429" in err_str or 
@@ -106,7 +101,7 @@ class GeminiKeyManager:
                 )
                 is_server_error = "500" in err_str or "503" in err_str or "unavailable" in err_str.lower() or "high demand" in err_str.lower()
 
-                if is_rate_limit or is_server_error:
+                if is_rate_limit or is_server_error or "404" in err_str or isinstance(e, asyncio.TimeoutError):
                     backoff = min(1.0 * (attempt + 1), 3.0)
                     next_model = candidate_models[(attempt + 1) % len(candidate_models)]
                     logger.warning(
@@ -121,7 +116,7 @@ class GeminiKeyManager:
                     logger.error(f"[GeminiKeyManager] Unhandled Gemini API error on '{current_model}': {err_str}")
                     raise e
 
-        raise RuntimeError(f"All Gemini API attempts failed after {attempts} attempts. Last error: {last_exception}")
+        raise RuntimeError(f"All Gemini API attempts failed after {attempts} attempts.")
 
 # Global singleton instance
 key_manager = GeminiKeyManager()

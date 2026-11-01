@@ -2,13 +2,14 @@ from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field
 
 class LocationInput(BaseModel):
-    lat: float
-    lon: float
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lon: float = Field(ge=-180, le=180, allow_inf_nan=False)
     name: Optional[str] = "Selected Location"
     state: Optional[str] = None
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, description="Farmer query in any Indian language or English")
+    request_id: Optional[str] = Field(None, min_length=8, max_length=100)
+    message: str = Field(..., min_length=1, max_length=6000, description="Farmer query in any Indian language or English")
     session_id: Optional[str] = Field(default=None, description="Optional existing session ID to continue history")
     language: Optional[str] = Field(default=None, description="Optional language hint; auto-detected if omitted")
     location: Optional[LocationInput] = None
@@ -49,6 +50,7 @@ class ProgressEvent(BaseModel):
     type: str # 'thinking' | 'tool_start' | 'tool_end' | 'synthesizing' | 'translating' | 'speaking' | 'complete' | 'error'
     message: str
     tool: Optional[str] = None
+    inputs: Optional[Dict[str, Any]] = None
     duration_ms: Optional[int] = None
     data: Optional[Any] = None
 
@@ -67,6 +69,7 @@ class SessionSummary(BaseModel):
     updated_at: str
 
 class MessageRecord(BaseModel):
+    advisory_id: Optional[str] = None
     id: str
     session_id: str
     role: str
@@ -90,6 +93,7 @@ class AdvisorySummary(BaseModel):
     created_at: str
 
 class AdvisoryDetail(BaseModel):
+    evidence: Dict[str, Any] = {}
     id: str
     session_id: Optional[str] = None
     crop_name: str
@@ -131,12 +135,20 @@ class WeatherAlert(BaseModel):
     severity: str = "warning"
 
 class WeatherResponse(BaseModel):
+    source: Optional[str] = None
+    retrieved_at: Optional[str] = None
+    data_kind: Optional[str] = None
+    note: Optional[str] = None
     location: Dict[str, Any]
     current: Dict[str, Any]
     daily: WeatherDaily
     alerts: List[WeatherAlert] = []
 
 class SoilResponse(BaseModel):
+    source: Optional[str] = None
+    retrieved_at: Optional[str] = None
+    data_kind: Optional[str] = None
+    note: Optional[str] = None
     lat: float
     lon: float
     ph: float
@@ -150,6 +162,7 @@ class SoilResponse(BaseModel):
     summary: str
 
 class MandiMarketItem(BaseModel):
+    stale: bool = False
     market: str
     district: str
     state: str
@@ -161,6 +174,11 @@ class MandiMarketItem(BaseModel):
     date: str
 
 class MandiResponse(BaseModel):
+    source: Optional[str] = None
+    retrieved_at: Optional[str] = None
+    data_kind: Optional[str] = None
+    status: str = "success"
+    error: Optional[str] = None
     commodity: str
     state: str
     markets: List[MandiMarketItem]
@@ -169,7 +187,7 @@ class MandiResponse(BaseModel):
     note: Optional[str] = None
 
 class TTSRequest(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=6000)
     language: str = "hi"
 
 class TTSResponse(BaseModel):
@@ -182,3 +200,14 @@ class STTResponse(BaseModel):
     language: str
     confidence: Optional[float] = None
 
+
+class ProfileUpdate(BaseModel):
+    location_name: Optional[str] = Field(None, max_length=200)
+    latitude: Optional[float] = Field(None, ge=-90, le=90, allow_inf_nan=False)
+    longitude: Optional[float] = Field(None, ge=-180, le=180, allow_inf_nan=False)
+    state: Optional[str] = Field(None, max_length=100)
+    district: Optional[str] = Field(None, max_length=100)
+    land_size_acres: Optional[float] = Field(None, ge=0, le=100000, allow_inf_nan=False)
+    primary_crop: Optional[str] = Field(None, max_length=200)
+    soil_type: Optional[str] = Field(None, max_length=100)
+    language: Optional[str] = Field(None, pattern=r"^[a-z]{2}$")

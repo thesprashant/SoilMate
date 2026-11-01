@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { Sprout, MessageSquare, X, ChevronUp, Plus } from 'lucide-react'
 import VoiceAssistant from './VoiceAssistant'
 import ChatMessages from './ChatMessages'
@@ -27,7 +27,11 @@ export default function ChatPanel({
   onNewSession,
   streamingEvent,
   setStreamingEvent,
-  setFarmerProfile
+  setFarmerProfile,
+  liveTraces,
+  setLiveTraces,
+  ensureSession,
+  disabled
 }) {
   const [loading, setLoading] = useState(false)
   const [chatWindowOpen, setChatWindowOpen] = useState(false)
@@ -36,206 +40,50 @@ export default function ChatPanel({
   // Dynamic UI Translation dictionary for current UI Language
   const t = getUITranslations(uiLanguage)
 
-  const handleSendMessage = async (text, isVoice = false) => {
-    if (!text.trim()) return
-
-    // 1. Conversational Barge-In: immediately silence any ongoing speech playback
-    stopCurrentAudio()
-
-    // 2. Abort any in-flight response generation from previous turn
-    if (abortControllerRef.current) {
-      try {
-        abortControllerRef.current.abort()
-      } catch (_) {}
-      abortControllerRef.current = null
-    }
-
-    const currentController = new AbortController()
-    abortControllerRef.current = currentController
-
-    // Immediately switch dynamic view back to 'workflow' on any talk or message
-    onUserActivity?.()
-
-    const userMsg = {
-      id: `usr_${Date.now()}`,
-      role: 'user',
-      content: text,
-      language: spokenLanguage,
-      created_at: new Date().toISOString()
-    }
-    setMessages((prev) => [...prev, userMsg])
-    setLoading(true)
-
-    try {
-      await chatStream(
-        {
-          message: text,
-          sessionId: sessionId,
-          language: spokenLanguage,
-          location: location || null,
-          voiceOutput: true,
-          signal: currentController.signal
-        },
-        {
-          onProgress: (ev) => {
-            if (currentController.signal.aborted) return
-            setStreamingEvent(ev)
-          },
-          onComplete: (data) => {
-            if (currentController.signal.aborted) return
-            abortControllerRef.current = null
-
-            if (data.session_id) {
-              setSessionId(data.session_id)
-            }
-
-            // If backend identified the spoken/typed Indian language, update spokenLanguage
-            if (data.language && data.language !== spokenLanguage) {
-              setSpokenLanguage?.(data.language)
-            }
-            // CRITICAL: UI Language is untouched; it is solely controlled by the top selector.
-
-            // Save and update profile
-            if (data.farmer_profile) {
-              setFarmerProfile?.(data.farmer_profile)
-              if (data.farmer_profile.location_name && data.farmer_profile.latitude != null) {
-                setLocation({
-                  name: data.farmer_profile.location_name,
-                  lat: data.farmer_profile.latitude,
-                  lon: data.farmer_profile.longitude,
-                  state: data.farmer_profile.state || ''
-                })
-              }
-            }
-
-            const assistantMsg = {
-              id: `asst_${Date.now()}`,
-              role: 'assistant',
-              content: data.response,
-              content_english: data.response_english,
-              language: data.language,
-              audio_base64: data.audio_base64,
-              tool_calls: data.tool_calls || [],
-              created_at: new Date().toISOString()
-            }
-            setMessages((prev) => [...prev, assistantMsg])
-            setStreamingEvent(null)
-            setLoading(false)
-
-            // Auto-play audio response with single-playback guarantee
-            if (data.audio_base64 && !currentController.signal.aborted) {
-              playAudioBase64(data.audio_base64)
-            }
-          },
-          onError: async (err) => {
-            if (currentController.signal.aborted) return
-            console.warn('SSE stream error, falling back to sync chat:', err)
-            try {
-              const res = await chatSync({
-                message: text,
-                sessionId: sessionId,
-                language: spokenLanguage,
-                location: location || null,
-                voiceOutput: true
-              })
-
-              if (currentController.signal.aborted) return
-              abortControllerRef.current = null
-
-              if (res.session_id) setSessionId(res.session_id)
-              if (res.language && res.language !== spokenLanguage) {
-                setSpokenLanguage?.(res.language)
-              }
-
-              if (res.farmer_profile) {
-                setFarmerProfile?.(res.farmer_profile)
-                if (res.farmer_profile.location_name && res.farmer_profile.latitude != null) {
-                  setLocation({
-                    name: res.farmer_profile.location_name,
-                    lat: res.farmer_profile.latitude,
-                    lon: res.farmer_profile.longitude,
-                    state: res.farmer_profile.state || ''
-                  })
-                }
-              }
-
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: `asst_${Date.now()}`,
-                  role: 'assistant',
-                  content: res.response,
-                  content_english: res.response_english,
-                  language: res.language,
-                  audio_base64: res.audio_base64,
-                  tool_calls: res.tool_calls || [],
-                  created_at: new Date().toISOString()
-                }
-              ])
-
-              if (res.audio_base64 && !currentController.signal.aborted) {
-                playAudioBase64(res.audio_base64)
-              }
-            } catch (syncErr) {
-              if (currentController.signal.aborted) return
-              alert(`Error: ${syncErr.message || 'Failed to reach SoilMate server'}`)
-            } finally {
-              if (!currentController.signal.aborted) {
-                setStreamingEvent(null)
-                setLoading(false)
-              }
-            }
-          }
-        }
-      )
-    } catch (e) {
-      if (!currentController.signal.aborted) {
-        console.error('Chat error:', e)
-        setStreamingEvent(null)
-        setLoading(false)
-      }
-    }
+  const [error, setError] = useState('')
+  useEffect(() => () => { abortControllerRef.current?.abort(); stopCurrentAudio() }, [])
+  const acceptProgress = ev => {
+    setStreamingEvent(ev)
+    if (ev.type === 'tool_end') setLiveTraces?.(previous => [...previous, { tool: ev.tool, inputs: ev.inputs || {}, outputs: ev.data, duration_ms: ev.duration_ms, summary: ev.message, status: ev.data?.error ? 'error' : 'success' }])
   }
-
-  // Gemini Multimodal Live WebSocket Hook for sub-second conversational speech-to-speech
   const geminiLive = useGeminiLive({
-    uiLanguage,
-    location,
-    sessionId,
-    onProgress: (ev) => {
-      setStreamingEvent(ev)
-    },
-    onComplete: (data) => {
+    uiLanguage: spokenLanguage, location, sessionId, ensureSession,
+    onProgress: acceptProgress,
+    onComplete: data => {
       setStreamingEvent(null)
       if (data.session_id) setSessionId(data.session_id)
-      if (data.farmer_profile) {
-        setFarmerProfile?.(data.farmer_profile)
-        if (data.farmer_profile.location_name && data.farmer_profile.latitude != null) {
-          setLocation({
-            name: data.farmer_profile.location_name,
-            lat: data.farmer_profile.latitude,
-            lon: data.farmer_profile.longitude,
-            state: data.farmer_profile.state || ''
-          })
-        }
-      }
-      if (data.content) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `asst_${Date.now()}`,
-            role: 'assistant',
-            content: data.content,
-            language: uiLanguage,
-            created_at: new Date().toISOString()
-          }
-        ])
-      }
+      if (data.farmer_profile) setFarmerProfile?.(data.farmer_profile)
+      const records = []
+      if (data.user_content) records.push({ id: crypto.randomUUID(), role: 'user', content: data.user_content, language: data.language })
+      if (data.content) records.push({ id: crypto.randomUUID(), role: 'assistant', content: data.content, language: data.language, tool_calls: data.tool_calls || [], advisory_id: data.advisory_id })
+      setMessages(previous => [...previous, ...records]); setLiveTraces?.([])
     },
-    onError: (err) => {
-      console.warn('Gemini Live WebSocket notice:', err.message)
-    }
+    onError: err => { setError(err.message); setStreamingEvent(null) }
   })
+  const handleSendMessage = async text => {
+    if (!text.trim() || disabled || loading) return
+    stopCurrentAudio(); geminiLive.disconnectLive(); abortControllerRef.current?.abort()
+    const controller = new AbortController(); abortControllerRef.current = controller
+    setError(''); setLoading(true); onUserActivity?.()
+    try {
+      const sid = await ensureSession()
+      if (controller.signal.aborted) return
+      setMessages(previous => [...previous, { id: crypto.randomUUID(), role: 'user', content: text, language: spokenLanguage }])
+      await chatStream({ message: text, sessionId: sid, language: spokenLanguage, location, voiceOutput: true, signal: controller.signal }, {
+        onProgress: ev => { if (!controller.signal.aborted) acceptProgress(ev) },
+        onComplete: data => {
+          if (controller.signal.aborted) return
+          if (data.language) setSpokenLanguage?.(data.language)
+          if (data.farmer_profile) setFarmerProfile?.(data.farmer_profile)
+          setMessages(previous => [...previous, { id: crypto.randomUUID(), role: 'assistant', content: data.response, content_english: data.response_english, language: data.language, audio_base64: data.audio_base64, tool_calls: data.tool_calls || [], advisory_id: data.advisory_id }])
+          setLiveTraces?.([])
+          if (data.audio_base64) playAudioBase64(data.audio_base64)
+        },
+        onError: err => { if (!controller.signal.aborted) setError(err.message) }
+      })
+    } catch (err) { if (!controller.signal.aborted) setError(err.message) }
+    finally { if (!controller.signal.aborted) { setLoading(false); setStreamingEvent(null) } }
+  }
 
   // Voice speech hook uses the active spokenLanguage
   const speech = useSpeech(spokenLanguage, (transcript) => {
@@ -249,6 +97,9 @@ export default function ChatPanel({
     // Silence audio immediately upon tapping to talk
     stopCurrentAudio()
     onUserActivity?.()
+    if (disabled) return
+    abortControllerRef.current?.abort()
+    setLoading(false)
     geminiLive.toggleLive()
   }
 
@@ -262,9 +113,9 @@ export default function ChatPanel({
       : geminiLive.liveTranscript
       ? geminiLive.liveTranscript
       : (t?.listening || "Listening... Speak naturally"),
-    error: null,
+    error: geminiLive.error,
     toggle: handleOrbToggle,
-    clearError: () => {}
+    clearError: geminiLive.clearError
   }
 
   const handleNewSessionAction = () => {
@@ -277,7 +128,8 @@ export default function ChatPanel({
   const latestMessage = messages[messages.length - 1]
 
   return (
-    <aside className="relative flex flex-col h-full w-full lg:w-[480px] xl:w-[520px] border-r border-purple-500/20 bg-[#07040D] shrink-0 overflow-hidden">
+    <aside className="relative flex flex-col h-[75vh] min-h-[520px] lg:h-full w-full border-r border-purple-500/20 bg-[#07040D] shrink-0 overflow-hidden">
+      {error && <div role="alert" className="p-3 text-sm text-red-200">{error} <button onClick={() => setError('')}>Dismiss</button></div>}
       {chatWindowOpen ? (
         /* ================= FULL CHAT VIEW (COVERS TALK BUTTON, 100% OPAQUE) ================= */
         <div className="flex-1 flex flex-col h-full w-full bg-[#07040D] overflow-hidden">
@@ -337,6 +189,7 @@ export default function ChatPanel({
             <ChatMessages
               messages={messages}
               streamingEvent={streamingEvent}
+              liveTraces={liveTraces}
               loading={loading}
               t={t}
             />
@@ -346,7 +199,7 @@ export default function ChatPanel({
               onSendMessage={(txt) => handleSendMessage(txt, false)}
               language={spokenLanguage}
               placeholder={t.typePlaceholder}
-              disabled={loading}
+              disabled={loading || disabled || isLiveActive}
               t={t}
             />
           </div>

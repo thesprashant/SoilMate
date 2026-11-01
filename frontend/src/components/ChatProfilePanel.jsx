@@ -1,8 +1,23 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import { User, MapPin, Sprout, Layers, Globe, Database, Sparkles, CheckCircle2, AlertCircle } from 'lucide-react'
 import { localizePlaceName, localizeState, localizeCropName, localizeSoilType } from '../utils/geoLocalization'
 
-export default function ChatProfilePanel({ location, language, sessionId, farmerProfile, t }) {
+export default function ChatProfilePanel({ location, language, sessionId, farmerProfile, t, onSave }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState({})
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => { setDraft(farmerProfile || {}) }, [farmerProfile])
+  const save = async e => {
+    e.preventDefault(); setSaving(true); setError('')
+    try {
+      const values = {}
+      for (const key of ['location_name', 'state', 'district', 'primary_crop', 'soil_type', 'language', 'land_size_acres', 'latitude', 'longitude']) {
+        if (draft[key] !== farmerProfile?.[key]) values[key] = ['land_size_acres', 'latitude', 'longitude'].includes(key) ? (draft[key] === '' ? null : Number(draft[key])) : draft[key] || null
+      }
+      await onSave(values); setEditing(false)
+    } catch (err) { setError(err.message) } finally { setSaving(false) }
+  }
   const locName = farmerProfile?.location_name || location?.name
   const lat = farmerProfile?.latitude ?? location?.lat
   const lon = farmerProfile?.longitude ?? location?.lon
@@ -14,6 +29,15 @@ export default function ChatProfilePanel({ location, language, sessionId, farmer
 
   return (
     <div className="space-y-4">
+      <button onClick={() => setEditing(!editing)} className="px-4 py-2 rounded-xl border border-purple-400 text-sm">{editing ? 'Cancel editing' : 'Edit farm profile'}</button>
+      {error && <p role="alert" className="text-red-200 text-sm">{error}</p>}
+      {editing && <form onSubmit={save} className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 border border-purple-500/30 rounded-xl">
+        {['location_name', 'state', 'district', 'primary_crop', 'soil_type', 'land_size_acres', 'latitude', 'longitude'].map(key => <label key={key} className="text-xs space-y-1 capitalize">{key.replaceAll('_', ' ')}
+          <input type={['land_size_acres', 'latitude', 'longitude'].includes(key) ? 'number' : 'text'} step="any" maxLength={200} value={draft[key] ?? ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })} className="block w-full p-2 bg-purple-950 rounded-lg border border-purple-500/30" />
+        </label>)}
+        <label className="text-xs">Conversation language<select value={draft.language || language} onChange={e => setDraft({ ...draft, language: e.target.value })} className="block w-full p-2 bg-purple-950 rounded-lg">{['en','hi','te','ta','kn','bn','mr','gu','pa','ml','od','ur'].map(code => <option key={code}>{code}</option>)}</select></label>
+        <button disabled={saving} className="p-2 bg-purple-700 rounded-lg">{saving ? 'Saving...' : 'Save profile'}</button>
+      </form>}
       {/* Profile Overview Card */}
       <div className="rounded-2xl border border-purple-500/25 bg-dark-900/70 p-5 shadow-[0_8px_32px_0_rgba(0,0,0,0.5)] backdrop-blur-xl space-y-4">
         <div className="flex items-center justify-between border-b border-purple-500/20 pb-3">
@@ -25,7 +49,7 @@ export default function ChatProfilePanel({ location, language, sessionId, farmer
               <h2 className="text-base font-bold text-white flex items-center gap-2">
                 {t?.profileTitle || 'Farmer Profile & Memory'}
                 <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-500/30">
-                  {t?.profileSaved || 'PERSISTENT'}
+                  {sessionId ? 'SAVED SESSION' : 'NOT SAVED YET'}
                 </span>
               </h2>
               <p className="text-xs text-purple-300/70">

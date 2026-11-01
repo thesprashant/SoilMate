@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { stopCurrentAudio } from '../utils/audioManager'
+import { liveSocketUrl } from '../services/api'
 
 /**
  * useGeminiLive: Real-Time Multimodal Voice & Audio WebSocket Hook
@@ -18,14 +19,19 @@ export default function useGeminiLive({
   onProgress,
   onComplete,
   onError,
-  onTextChunk
+  onTextChunk,
+  ensureSession
 }) {
   const [active, setActive] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [speaking, setSpeaking] = useState(false)
   const [liveTranscript, setLiveTranscript] = useState('')
+  const [error, setError] = useState('')
 
   const wsRef = useRef(null)
+  const connectionVersion = useRef(0)
+  const callbacks = useRef({})
+  callbacks.current = { onProgress, onComplete, onError, onTextChunk }
   const micAudioCtxRef = useRef(null)
   const micStreamRef = useRef(null)
   const processorRef = useRef(null)
@@ -119,12 +125,20 @@ export default function useGeminiLive({
           autoGainControl: true
         }
       })
+      // Permission can resolve after the user ends or replaces the call.
+      if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
       micStreamRef.current = stream
 
       const AudioContextClass = window.AudioContext || window.webkitAudioContext
       const micCtx = new AudioContextClass({ sampleRate: 16000 })
       if (micCtx.state === 'suspended') {
         await micCtx.resume()
+      }
+      if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) {
+        stream.getTracks().forEach(track => track.stop()); await micCtx.close(); return
       }
       micAudioCtxRef.current = micCtx
 
@@ -162,10 +176,13 @@ export default function useGeminiLive({
       sourceNode.connect(processor)
       processor.connect(micCtx.destination)
     } catch (err) {
+      if (wsRef.current !== ws) return
       console.error('[GeminiLive] Mic access error:', err)
-      onError?.(err)
+      setError(err.message || 'Could not access the microphone.')
+      callbacks.current.onError?.(err)
+      disconnectLive()
     }
-  }, [onError])
+  }, [])
 
   // Clean up mic capture
   const stopMicCapture = useCallback(() => {
@@ -189,29 +206,31 @@ export default function useGeminiLive({
 
   // Connect to Gemini Live WebSocket
   const connectLive = useCallback(async () => {
+    if (wsRef.current) return
     stopCurrentAudio()
     stopPlayback()
 
     setConnecting(true)
+    setError('')
     setLiveTranscript('')
     currentModelTextRef.current = ''
 
-    // Determine WebSocket host URL
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    const wsUrl = `${protocol}//${host}/api/ws/live`
-
+    const attempt = ++connectionVersion.current
     let pingTimer = null
     try {
+      const activeSession = await ensureSession()
+      if (attempt !== connectionVersion.current) return
+      const wsUrl = liveSocketUrl()
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
       ws.onopen = async () => {
+        if (wsRef.current !== ws) { ws.close(); return }
         // Send initial session handshake
         ws.send(
           JSON.stringify({
             type: 'init',
-            session_id: sessionId,
+            session_id: activeSession,
             language: uiLanguage,
             location: location || null
           })
@@ -227,6 +246,7 @@ export default function useGeminiLive({
       }
 
       ws.onmessage = (event) => {
+        if (wsRef.current !== ws) return
         try {
           const msg = JSON.parse(event.data)
 
@@ -237,40 +257,49 @@ export default function useGeminiLive({
           } else if (msg.type === 'audio') {
             // Real-time 24kHz PCM audio chunk from Gemini
             playPcmChunk(msg.data)
+          } else if (msg.type === 'user_text') {
+            setLiveTranscript(msg.text)
           } else if (msg.type === 'text') {
             // Streaming text chunk from Gemini
             currentModelTextRef.current += msg.text
             setLiveTranscript(currentModelTextRef.current)
-            onTextChunk?.(msg.text, currentModelTextRef.current)
+            callbacks.current.onTextChunk?.(msg.text, currentModelTextRef.current)
           } else if (msg.type === 'interrupted') {
             // Instant barge-in: farmer spoke while Gemini was talking
             stopPlayback()
           } else if (msg.type === 'tool_start') {
-            onProgress?.({
-              step: 'tool_start',
+            callbacks.current.onProgress?.({
+              type: 'tool_start',
               tool: msg.tool,
               message: msg.summary || `Running ${msg.tool}...`,
               inputs: msg.args
             })
           } else if (msg.type === 'tool_end') {
-            onProgress?.({
-              step: 'tool_end',
+            callbacks.current.onProgress?.({
+              type: 'tool_end',
               tool: msg.tool,
               message: msg.summary || `${msg.tool} completed`,
               data: msg.data,
-              duration_ms: msg.duration_ms
+              duration_ms: msg.duration_ms,
+              inputs: msg.inputs
             })
           } else if (msg.type === 'turn_complete') {
             const finalReply = currentModelTextRef.current
             currentModelTextRef.current = ''
-            onComplete?.({
+            callbacks.current.onComplete?.({
               session_id: msg.session_id,
               farmer_profile: msg.farmer_profile,
-              content: finalReply
+              content: msg.content || finalReply,
+              user_content: msg.user_content,
+              language: msg.language,
+              tool_calls: msg.tool_calls || [],
+              advisory_id: msg.advisory_id
             })
           } else if (msg.type === 'error') {
             console.error('[GeminiLive] Server error:', msg.message)
-            onError?.(new Error(msg.message))
+            setError(msg.message || 'Live voice connection failed.')
+            callbacks.current.onError?.(new Error(msg.message))
+            disconnectLive()
           }
         } catch (e) {
           console.error('[GeminiLive] Parse error:', e)
@@ -279,25 +308,31 @@ export default function useGeminiLive({
 
       ws.onerror = (e) => {
         if (pingTimer) clearInterval(pingTimer)
+        if (wsRef.current !== ws) return
         console.warn('[GeminiLive] WebSocket error:', e)
-        onError?.(new Error('WebSocket connection error'))
+        setError('Live voice connection failed. Check that the backend is running.')
+        callbacks.current.onError?.(new Error('WebSocket connection error'))
         disconnectLive()
       }
 
       ws.onclose = (e) => {
         if (pingTimer) clearInterval(pingTimer)
+        if (wsRef.current !== ws) return
         console.log('[GeminiLive] WebSocket closed, code:', e?.code, 'reason:', e?.reason)
         disconnectLive()
       }
     } catch (err) {
+      if (attempt !== connectionVersion.current) return
       console.error('[GeminiLive] Connection failure:', err)
       setConnecting(false)
-      onError?.(err)
+      setError(err.message || 'Could not connect to live voice.')
+      callbacks.current.onError?.(err)
     }
-  }, [sessionId, uiLanguage, location, startMicCapture, playPcmChunk, stopPlayback, onProgress, onComplete, onError, onTextChunk])
+  }, [sessionId, uiLanguage, location, startMicCapture, playPcmChunk, stopPlayback, onProgress, onComplete, onError, onTextChunk, ensureSession])
 
   // Disconnect and reset
   const disconnectLive = useCallback(() => {
+    connectionVersion.current += 1
     stopMicCapture()
     stopPlayback()
     if (wsRef.current) {
@@ -306,6 +341,8 @@ export default function useGeminiLive({
       } catch (_) {}
       wsRef.current = null
     }
+    if (playAudioCtxRef.current) { playAudioCtxRef.current.close().catch(() => {}); playAudioCtxRef.current = null }
+    nextPlayTimeRef.current = 0
     setActive(false)
     setConnecting(false)
   }, [stopMicCapture, stopPlayback])
@@ -339,6 +376,8 @@ export default function useGeminiLive({
     connecting,
     speaking,
     liveTranscript,
+    error,
+    clearError: () => setError(''),
     toggleLive,
     connectLive,
     disconnectLive,

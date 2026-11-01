@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Sprout, User, Volume2, Globe, Sparkles } from 'lucide-react'
-import AgentTraceView from './AgentTraceView'
 import { playAudioBase64, stopCurrentAudio } from '../utils/audioManager'
+import AgentTraceView from './AgentTraceView'
 
 function MessageItem({ m, t }) {
   const isUser = m.role === 'user'
@@ -73,11 +73,8 @@ function MessageItem({ m, t }) {
             </div>
           )}
 
-          {!isUser && m.tool_calls && m.tool_calls.length > 0 && (
-            <div className="mt-2">
-              <AgentTraceView toolCalls={m.tool_calls} t={t} />
-            </div>
-          )}
+          {!isUser && m.tool_calls?.length > 0 && <div className="mt-3"><AgentTraceView toolCalls={m.tool_calls} t={t} /></div>}
+
         </div>
 
         <span className="text-[10px] text-purple-400/60 font-medium px-1">
@@ -89,7 +86,7 @@ function MessageItem({ m, t }) {
   )
 }
 
-export default function ChatMessages({ messages, streamingEvent, loading, t }) {
+export default function ChatMessages({ messages, streamingEvent, liveTraces, loading, t }) {
   const bottomRef = useRef(null)
 
   useEffect(() => {
@@ -108,6 +105,8 @@ export default function ChatMessages({ messages, streamingEvent, loading, t }) {
           <MessageItem key={m.id || idx} m={m} t={t} />
         ))
       )}
+      {liveTraces?.length > 0 && <div className="ml-10 my-3"><AgentTraceView toolCalls={liveTraces} t={t} /></div>}
+      {streamingEvent?.type === 'tool_start' && <p role="status" className="ml-10 my-2 text-xs text-cyan-300">{streamingEvent.message || 'Fetching data…'}</p>}
       <div ref={bottomRef} />
     </div>
   )

@@ -166,14 +166,15 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
         t_target = DEEP_TRANSLATE_LANG_MAP.get(t_lang, "english")
 
         loop = asyncio.get_running_loop()
-        translated = await loop.run_in_executor(
-            None,
-            lambda: GoogleTranslator(source=s_target, target=t_target).translate(text)
-        )
-        return translated.strip() if translated else text
+        translated = await asyncio.wait_for(loop.run_in_executor(
+            None, lambda: GoogleTranslator(source=s_target, target=t_target).translate(text)
+        ), 10)
+        if not translated:
+            raise ValueError("No translation returned")
+        return translated.strip()
     except Exception as e:
         logger.error(f"[translate_text] Deep-translator error: {e}. Returning original text.")
-        return text
+        raise RuntimeError("Translation is temporarily unavailable; please retry or choose another language.") from e
 
 async def translate_to_english(text: str, source_lang: str) -> str:
     """Helper to convert any Indian language text to English for agent processing."""

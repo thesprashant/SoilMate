@@ -4,17 +4,19 @@ import { fetchSessions, deleteSessionApi } from '../services/api'
 import { localizePlaceName } from '../utils/geoLocalization'
 
 export default function SessionHistory({ activeSessionId, onSelectSession, onNewSession, t }) {
+  const [error, setError] = useState('')
   const [sessions, setSessions] = useState([])
   const [loading, setLoading] = useState(false)
   const [deletingId, setDeletingId] = useState(null)
 
   const loadSessions = async () => {
     setLoading(true)
+    setError('')
     try {
       const res = await fetchSessions()
       setSessions(res)
     } catch (e) {
-      console.error('Failed to load sessions:', e)
+      setError(e.message)
     } finally {
       setLoading(false)
     }
@@ -72,6 +74,7 @@ export default function SessionHistory({ activeSessionId, onSelectSession, onNew
         </div>
       </div>
 
+      {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
       {loading && (
         <div className="p-6 text-center text-xs text-purple-300">
           <RefreshCw size={16} className="animate-spin mx-auto mb-2 text-purple-400" />
@@ -79,7 +82,7 @@ export default function SessionHistory({ activeSessionId, onSelectSession, onNew
         </div>
       )}
 
-      {!loading && sessions.length === 0 && (
+      {!loading && !error && sessions.length === 0 && (
         <div className="p-6 text-center text-xs text-purple-300/70 bg-purple-950/30 rounded-xl border border-purple-500/20">
           <MessageSquare size={24} className="mx-auto mb-1 text-purple-400 opacity-60" />
           <p className="font-semibold text-white">{t?.historyNoSessionsTitle || 'No previous sessions yet'}</p>
@@ -95,6 +98,7 @@ export default function SessionHistory({ activeSessionId, onSelectSession, onNew
             return (
               <div
                 key={s.id}
+                role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') onSelectSession(s.id) }}
                 onClick={() => onSelectSession(s.id)}
                 className={`w-full text-left p-3 flex items-center justify-between transition cursor-pointer group ${
                   isActive

@@ -28,7 +28,7 @@ async def speech_to_text(audio_bytes: bytes, filename: str = "audio.wav", langua
     }
     
     files = {
-        "file": (filename, audio_bytes, "audio/wav")
+        "file": (filename, audio_bytes, "audio/webm" if filename.endswith(".webm") else "audio/mp4" if filename.endswith(".mp4") else "audio/ogg" if filename.endswith(".ogg") else "audio/wav")
     }
     data = {
         "model": "saaras:v2",
@@ -45,7 +45,7 @@ async def speech_to_text(audio_bytes: bytes, filename: str = "audio.wav", langua
                 return {
                     "text": transcript.strip(),
                     "language": detected,
-                    "confidence": result.get("confidence", 0.95)
+                    "confidence": result.get("confidence")
                 }
             else:
                 logger.error(f"[speech_to_text] Sarvam STT returned status {resp.status_code}: {resp.text}")

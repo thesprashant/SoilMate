@@ -6,6 +6,7 @@ from google.genai import types
 
 from app.agent.prompts import SOILMATE_SYSTEM_PROMPT
 from app.agent.tools import AGENT_TOOLS, execute_tool
+from app.agent.advisories import persist_advice, validate_schedule, schedule_references
 from app.config import settings
 from app.services.gemini_pool import key_manager
 from app.services.language import (
@@ -16,10 +17,11 @@ from app.services.language import (
 )
 from app.services.translation import translate_to_english, translate_from_english
 from app.services.voice import text_to_speech
-from app.models.schemas import ChatResponse, ToolCallRecord, ProgressEvent, LocationInput, FarmerProfile
+from app.models.schemas import ProfileUpdate, ChatResponse, ToolCallRecord, ProgressEvent, LocationInput, FarmerProfile
 from app.db.repository import (
     create_or_update_session,
     update_session_profile,
+    patch_profile,
     get_session,
     save_message,
     get_session_messages,
@@ -41,7 +43,7 @@ def generate_tool_start_message(name: str, args: Dict[str, Any], location_name: 
         return f"Checking APMC mandi modal prices for {comm} in {state}..."
     elif name == "query_crop_database":
         season = args.get("season", "current season")
-        return f"Searching ICAR agronomic database for optimal {season} crops..."
+        return "Fetching official crop reference and checking its regional scope..."
     elif name == "get_pest_and_disease_risk":
         crop = args.get("crop", "crop")
         return f"Analyzing pest and fungal disease risks for {crop} under forecast weather..."
@@ -54,7 +56,7 @@ def generate_tool_start_message(name: str, args: Dict[str, Any], location_name: 
 
 def summarize_tool_output(name: str, output: Dict[str, Any]) -> str:
     """Create concise summary of tool results for UI traces."""
-    if not output or "error" in output:
+    if not output or output.get("error"):
         return output.get("error", "Failed to retrieve data.") if isinstance(output, dict) else "Done"
 
     if name == "get_weather":
@@ -77,8 +79,7 @@ def summarize_tool_output(name: str, output: Dict[str, Any]) -> str:
         return f"Mandi quotes search complete ({total} found)."
 
     elif name == "query_crop_database":
-        count = output.get("count", len(output.get("matched_crops", [])))
-        return f"Found {count} suitable crops in ICAR database matching soil & season parameters."
+        return f"Retrieved official {output.get('crop', 'crop')} reference. Check regional applicability."
 
     elif name == "get_pest_and_disease_risk":
         risks = output.get("identified_risks", [])
@@ -114,10 +115,10 @@ async def run_agent_turn(
     4. Auto-save history & crop advisories to SQLite.
     5. Translate response back to native language + generate TTS.
     """
-    async def emit_progress(p_type: str, msg: str, tool: Optional[str] = None, dur: Optional[int] = None, data: Any = None):
+    async def emit_progress(p_type: str, msg: str, tool: Optional[str] = None, dur: Optional[int] = None, data: Any = None, inputs: Any = None):
         if progress_callback:
             try:
-                ev = ProgressEvent(type=p_type, message=msg, tool=tool, duration_ms=dur, data=data)
+                ev = ProgressEvent(type=p_type, message=msg, tool=tool, duration_ms=dur, data=data, inputs=inputs)
                 await progress_callback(ev)
             except Exception as e:
                 logger.warning(f"[run_agent_turn] progress_callback error: {e}")
@@ -144,7 +145,7 @@ async def run_agent_turn(
     # Priority 1: User explicitly provided location in request (e.g. from UI search/dropdown)
     # Priority 2: Session already has saved profile from past conversation turns
     # Priority 3: Unknown
-    if location and location.lat and location.lon and location.name and location.name not in ["Farm", "Selected Location"]:
+    if location and location.lat is not None and location.lon is not None and location.name and location.name not in ["Farm", "Selected Location"]:
         loc_name = location.name
         loc_lat = location.lat
         loc_lon = location.lon
@@ -154,7 +155,7 @@ async def run_agent_turn(
         loc_lat = saved_lat
         loc_lon = saved_lon
         loc_state = saved_state
-    elif location and location.lat and location.lon:
+    elif location and location.lat is not None and location.lon is not None:
         loc_name = location.name
         loc_lat = location.lat
         loc_lon = location.lon
@@ -257,16 +258,12 @@ async def run_agent_turn(
             )
         except Exception as e:
             logger.error(f"[AgentLoop] Gemini generation failed: {e}")
-            final_english_response = (
-                f"I encountered a temporary connection issue while analyzing your query. "
-                f"Based on agricultural best practices for {loc_name}, please ensure regular field drainage "
-                f"and consult your local Krishi Vigyan Kendra (KVK)."
-            )
+            raise RuntimeError("The language model is unavailable. Please retry; no advisory was generated.") from e
             break
 
         candidates = getattr(response, "candidates", [])
         if not candidates or not candidates[0].content or not candidates[0].content.parts:
-            final_english_response = "I have analyzed your query based on current seasonal standards."
+            raise RuntimeError("The model returned no usable response.")
             break
 
         model_parts = candidates[0].content.parts
@@ -298,53 +295,37 @@ async def run_agent_turn(
                     tool_args["state"] = loc_state
 
             start_msg = generate_tool_start_message(tool_name, tool_args, loc_name)
-            await emit_progress("tool_start", start_msg, tool=tool_name)
+            await emit_progress("tool_start", start_msg, tool=tool_name, inputs=tool_args)
 
             t0 = time.time()
-            tool_output = await execute_tool(tool_name, tool_args)
+            if tool_name == "record_crop_schedule":
+                user_dates = " ".join((m.get("content", "") + " " + (m.get("content_english") or "")) for m in past_messages if m.get("role") == "user")
+                references = await schedule_references(tool_args, [t.model_dump() for t in tool_traces], past_messages)
+                tool_output = validate_schedule(tool_args, references, user_dates)
+            else:
+                tool_output = await execute_tool(tool_name, tool_args)
             dur_ms = int((time.time() - t0) * 1000)
 
             # If tool was update_farmer_profile, immediately update active location & DB!
-            if tool_name == "update_farmer_profile" and isinstance(tool_output, dict):
-                if tool_output.get("location_name"):
-                    loc_name = tool_output.get("location_name")
-                if tool_output.get("latitude") is not None:
-                    loc_lat = tool_output.get("latitude")
-                if tool_output.get("longitude") is not None:
-                    loc_lon = tool_output.get("longitude")
-                if tool_output.get("state"):
-                    loc_state = tool_output.get("state")
-                if tool_output.get("district"):
-                    saved_district = tool_output.get("district")
-                if tool_output.get("land_size_acres") is not None:
-                    saved_land = tool_output.get("land_size_acres")
-                if tool_output.get("primary_crops"):
-                    saved_crop = tool_output.get("primary_crops")
-                if tool_output.get("soil_type"):
-                    saved_soil = tool_output.get("soil_type")
-
-                # Persist to database session
-                await update_session_profile(
-                    session_id=active_session_id,
-                    location_name=loc_name,
-                    latitude=loc_lat,
-                    longitude=loc_lon,
-                    state=loc_state,
-                    district=saved_district,
-                    land_size_acres=saved_land,
-                    primary_crop=saved_crop,
-                    soil_type=saved_soil
-                )
+            if tool_name == "update_farmer_profile" and isinstance(tool_output, dict) and not tool_output.get("error"):
+                updates = {k: tool_output.get("primary_crops" if k == "primary_crop" else k) for k in ["location_name", "latitude", "longitude", "state", "district", "land_size_acres", "primary_crop", "soil_type"]}
+                updates = {k: v for k, v in updates.items() if v is not None}
+                if "location_name" in tool_args:
+                    updates.update(latitude=tool_output.get("latitude"), longitude=tool_output.get("longitude"))
+                profile = await patch_profile(active_session_id, ProfileUpdate(**updates).model_dump(exclude_unset=True))
+                loc_name, loc_lat, loc_lon = profile["location_name"], profile["latitude"], profile["longitude"]
+                loc_state, saved_district = profile["state"], profile["district"]
+                saved_land, saved_crop, saved_soil = profile["land_size_acres"], profile["primary_crop"], profile["soil_type"]
 
             summary = summarize_tool_output(tool_name, tool_output)
-            await emit_progress("tool_end", summary, tool=tool_name, dur=dur_ms, data=tool_output)
+            await emit_progress("tool_end", summary, tool=tool_name, dur=dur_ms, data=tool_output, inputs=tool_args)
 
             record = ToolCallRecord(
                 step=iteration,
                 tool=tool_name,
                 inputs=tool_args,
                 outputs=tool_output,
-                status="success" if "error" not in tool_output else "error",
+                status="error" if tool_output.get("error") else "success",
                 duration_ms=dur_ms,
                 summary=summary
             )
@@ -360,7 +341,7 @@ async def run_agent_turn(
         gemini_messages.append(types.Content(role="user", parts=function_responses))
 
     if not final_english_response:
-        final_english_response = "I have compiled the available soil and weather data for your field."
+        final_english_response = "The analysis reached its tool limit before a complete answer was available. Review the retrieved evidence or narrow your question."
 
     # Step 4: Translate Back to Farmer's Language
     await emit_progress("synthesizing", "Formulating complete agricultural advice and protective schedule...")
@@ -374,40 +355,9 @@ async def run_agent_turn(
         await emit_progress("speaking", f"Generating audio voice response in {lang_meta['name']}...")
         audio_b64 = await text_to_speech(localized_response, language=lang_code)
 
-    # Step 6: Extract & Persist Crop Advisory in DB if relevant
-    advisory_id = None
-    is_advisory_query = any(k in user_english.lower() for k in ["plant", "sow", "crop", "variety", "fertilizer", "yield", "seed", "grow"])
-    
-    if is_advisory_query and loc_name and loc_lat is not None and loc_lon is not None:
-        # Determine crop mentioned
-        crop_candidate = "Field Crop"
-        for t in tool_traces:
-            if t.tool == "query_crop_database":
-                matched = t.outputs.get("matched_crops", [])
-                if matched:
-                    crop_candidate = matched[0].get("name", "Field Crop")
-                    break
-            elif t.tool == "get_mandi_prices":
-                crop_candidate = t.inputs.get("commodity", crop_candidate)
-
-        weather_trace = next((t.outputs for t in tool_traces if t.tool == "get_weather"), None)
-        soil_trace = next((t.outputs for t in tool_traces if t.tool == "get_soil_data"), None)
-        mandi_trace = next((t.outputs for t in tool_traces if t.tool == "get_mandi_prices"), None)
-
-        saved_adv = await save_advisory(
-            session_id=active_session_id,
-            crop_name=crop_candidate,
-            crop_name_local=crop_candidate,
-            language=lang_code,
-            location_name=loc_name,
-            latitude=loc_lat,
-            longitude=loc_lon,
-            weather_summary=weather_trace,
-            soil_metrics=soil_trace,
-            market_summary=mandi_trace,
-            full_advisory_text=localized_response
-        )
-        advisory_id = saved_adv.get("id")
+    advisory_id = await persist_advice(active_session_id, lang_code, localized_response,
+        {"location_name": loc_name, "latitude": loc_lat, "longitude": loc_lon, "primary_crop": saved_crop},
+        [t.model_dump() for t in tool_traces], user_text=" ".join((m.get("content_english") or m.get("content") or "") for m in past_messages if m.get("role") == "user"))
 
     # Save Assistant Message & Tool Trace in DB
     tool_dicts = [t.model_dump() for t in tool_traces]
@@ -418,7 +368,8 @@ async def run_agent_turn(
         content_english=final_english_response,
         language=lang_code,
         audio_url=None,
-        tool_calls=tool_dicts
+        tool_calls=tool_dicts,
+        advisory_id=advisory_id
     )
 
     final_profile = FarmerProfile(
