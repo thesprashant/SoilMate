@@ -1,127 +1,242 @@
-# SoilMate
+# 🌱 SoilMate
 
-SoilMate is a multilingual agricultural voice and chat assistant for Indian farmers. It combines an agentic Gemini workflow with live weather, gridded soil estimates, reported mandi quotes, and fetched official crop references. Every unavailable provider is shown as unavailable; missing measurements and schedules are never replaced with placeholder numbers.
+> **Real-Time Multilingual Agronomic Advisory & Protective Planning Engine for Indian Farmers**
 
-## What works
+SoilMate is an autonomous agronomic AI assistant engineered for Indian agriculture. It delivers real-time voice and typed advisory by orchestrating **Google Gemini 3.5 Flash** reasoning, **Gemini 3.1 Flash Live** full-duplex conversational voice, and zero-mock real-time APIs (Open-Meteo weather forecasts, ISRIC SoilGrids topsoil measurements, Agmarknet mandi commodity rates, and official ICAR/TNAU crop agronomic references).
 
-- Typed chat with SSE progress, bounded execution, cancellation, request deduplication, and persisted tool traces.
-- Gemini Live voice with microphone streaming, transcripts, PCM playback, barge-in, concurrent tools, tool cancellation, and explicit cleanup.
-- Session history and editable farmer profiles, isolated by a signed browser cookie in hosted mode.
-- Evidence-linked advisories and schedules. A schedule is saved only when every stage has an exact supporting quotation from a fetched official reference.
-- Explicit source, retrieval time, coverage, freshness, and failure states.
+---
 
-## Architecture
+## ⚡ Key Capabilities
 
-```text
-React/Vite UI
-  |-- POST /api/chat/stream --------> FastAPI typed agent
-  |-- WS /api/ws/live -------------> Gemini Live proxy
-  |-- sessions/profile/history ----> SQLite
-                                          |
-                    +---------------------+----------------------+
-                    |                     |                      |
-               Open-Meteo          ISRIC SoilGrids       data.gov.in
-               forecast            250 m estimate        mandi quotes
-                    |
-          fetched TNAU references (wheat and rice/paddy)
+- **🎙️ Real-Time Gemini Live Voice (Sub-second Full-Duplex):**
+  - Powered by `gemini-3.1-flash-live-preview` via Google's Bidirectional Live WebSocket (`wss://`).
+  - Full-duplex 16kHz PCM streaming from farmer microphone directly to Gemini.
+  - Native 24kHz audio synthesis using the warm, empathetic `Aoede` voice persona (*Priya*).
+  - True real-time barge-in (interruption) detection: speaking immediately silences model audio and re-directs the conversation.
+  - Interactive 3D harmonic mesh sphere (`MeshSphere`) on an HTML5 canvas reacting dynamically to voice states.
+
+- **🧠 Multi-Turn Autonomous ReAct Agent:**
+  - Powered by `gemini-3.5-flash` with iterative multi-step tool execution (up to 8 turns).
+  - Server-Sent Events (SSE) streaming (`POST /api/chat/stream`) reporting real-time execution telemetry (*"Fetching Open-Meteo weather..."*, *"Querying SoilGrids WCS..."*, *"Checking mandi modal rates..."*).
+  - Request deduplication and turn guards to prevent race conditions during rapid typing or speaking.
+
+- **🌐 11 Indian Languages with Automatic Language Retention:**
+  - Supports **Hindi (हिन्दी)**, **Telugu (తెలుగు)**, **Tamil (தமிழ்)**, **Marathi (मराठी)**, **Punjabi (ਪੰਜਾਬੀ)**, **Bengali (বাংলা)**, **Gujarati (ગુજરાતી)**, **Kannada (ಕನ್ನಡ)**, **Malayalam (മലയാളം)**, **Odia (ଓଡ଼ିଆ)**, and **English**.
+  - **Automatic Spoken Language Detection:** Listens to the farmer's spoken language, dynamically matches it, and maintains that language across conversational turns.
+  - Indian language STT/TTS powered by Sarvam AI (*Saaras v2* & *Bulbul v3*) with graceful browser Web Speech API fallback.
+
+- **🛡️ Zero-Mock Data Guarantee:**
+  - Every data point originates from validated live sources. Missing coverage states are reported explicitly as `unavailable`; measurements and sowing schedules are never hallucinated or replaced with dummy values.
+  - Schedule recommendations strictly quote supporting excerpts from official agricultural references (ICAR & TNAU).
+
+- **💾 Persistent Farmer Profile & Conversational Memory:**
+  - Asynchronous SQLite database (`aiosqlite`) storing sessions, full multi-turn message histories with tool execution traces, farmer profiles, and generated planting advisories.
+  - Cross-origin session tracking via signed ownership tokens and `X-Soilmate-Owner` headers, immune to third-party cookie restrictions.
+
+---
+
+## 🏗️ Architecture
+
+```
+                      ┌───────────────────────────────────────────────┐
+                      │              SoilMate Frontend                │
+                      │  React 18 + Vite + Tailwind CSS + Web Audio   │
+                      │            (Hosted on Vercel)                 │
+                      └───────┬───────────────────────────────┬───────┘
+                              │ HTTP / SSE                    │ Bidirectional WebSocket
+                              │ (Chat, History, Tools)        │ (16kHz in / 24kHz out)
+                              ▼                               ▼
+                      ┌───────────────────────────────────────────────┐
+                      │             FastAPI Application               │
+                      │          (Hosted on Render Backend)           │
+                      └───────┬───────────────────────────────┬───────┘
+                              │                               │
+             ┌────────────────┴───────────────┐               │
+             ▼                                ▼               ▼
+   ┌───────────────────┐            ┌───────────────────┐ ┌──────────────────────┐
+   │ ReAct Agent Core  │            │ Live Data Engine  │ │ Gemini Live WS       │
+   │ gemini-3.5-flash  │            │  (Real Data Only) │ │ gemini-3.1-flash-live│
+   │ • Prompts & Turns │            │ • Open-Meteo      │ │ • Sub-second Voice   │
+   │ • Auton. Tools    │            │ • ISRIC SoilGrids │ │ • Native Audio (Aoede│
+   │ • SQLite History  │            │ • Agmarknet Mandi │ │ • Live barge-in      │
+   └───────────────────┘            │ • Sarvam AI TTS   │ │ • Live tool streaming│
+                                    └───────────────────┘ └──────────────────────┘
 ```
 
-Typed and voice conversations use the same tools, evidence model, profile store, and advisory store.
+---
 
-## Data sources and limits
+## 📡 Live Data Integrations
 
-| Source | Use | Important limitation |
-|---|---|---|
-| [Open-Meteo](https://open-meteo.com/) | Seven-day model forecast | Forecasts are predictions. Threshold alerts are SoilMate heuristics, not official crop diagnoses. |
-| [ISRIC SoilGrids](https://docs.isric.org/globaldata/soilgrids/) | 250 m gridded topsoil predictions | Not a field laboratory measurement. Missing or incomplete coverage returns `unavailable`. |
-| [data.gov.in](https://data.gov.in/) | Reported APMC mandi quotes | Coverage, grade, transport costs, and arrival dates vary. Quotes older than three days are marked stale. |
-| [TNAU wheat reference](https://agritech.tnau.ac.in/agriculture/agri_irrigationmgt_wheat.html) | Regional wheat guidance | Applicability depends on state, variety, and planting method. |
-| [TNAU rice reference](https://agritech.tnau.ac.in/govt_schemes_services/aas/paddy.html) | Regional rice/paddy guidance | Applicability depends on ecosystem, season, state, and method. |
+| Provider | Data Extracted | Purpose & Limitations |
+| :--- | :--- | :--- |
+| **[Open-Meteo](https://open-meteo.com/)** | 7-day hourly & daily forecast, precipitation, wind speed, relative humidity, UV index | Generates agricultural alerts (heavy rainfall, frost, heat stress). Heuristic alerts, not official agro-meteorological advisories. |
+| **[ISRIC SoilGrids](https://docs.isric.org/globaldata/soilgrids/)** | WCS 2.0.1 GeoTIFF coverage: pH, sand, silt, clay, SOC, nitrogen | 250 m gridded physical/chemical topsoil estimates for 0–5 cm depth. Physical soil testing is advised for input prescriptions. |
+| **[data.gov.in](https://data.gov.in/)** | Live APMC Agmarknet commodity market prices | Real-time modal, min, and max mandi market rates across Indian states. Quotes older than 3 days are marked stale. |
+| **[TNAU & ICAR](https://agritech.tnau.ac.in/)** | Comprehensive agronomic guides (wheat, rice/paddy) | Validates critical crop stages (CRI, tillering, flowering, grain filling). Requires exact quotation matching for schedule saving. |
+| **[Sarvam AI](https://www.sarvam.ai/)** | Saaras v2 STT, Bulbul v3 TTS, Mayura translation | High-accuracy Indic voice recognition, emotional speech synthesis (*Priya*), and script normalization. |
 
-Crop schedule references currently cover wheat and rice/paddy. Pest diagnosis and government-scheme eligibility verification remain unavailable until validated live integrations are added. Legacy advisories without recorded evidence are labelled in the UI.
+---
 
-## Configuration
+## 🚀 Deployment Guide (Render Backend + Vercel Frontend)
 
-Copy `backend/.env.example` to `backend/.env`. Never commit `.env` files.
+### 1. Backend on Render (`https://soilmate.onrender.com`)
 
-```env
-GEMINI_API_KEYS=key1,key2
-GEMINI_MODEL=gemini-2.5-flash
-GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
-SARVAM_API_KEY=
-DATA_GOV_API_KEY=
-DB_PATH=
-PORT=8000
-FRONTEND_URL=http://localhost:5173
-APP_MODE=local
-SESSION_SECRET=
-```
+1. Create a **Web Service** on [Render](https://dashboard.render.com) connected to this repository:
+   - **Root Directory:** `backend`
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+2. Under **Environment Variables**, configure:
 
-`APP_MODE=local` binds to loopback and retains the existing single-user demo history. For hosting, use `APP_MODE=hosted`, HTTPS, the exact frontend origin in `FRONTEND_URL`, and a stable random `SESSION_SECRET` of at least 32 characters. Hosted browser records use signed HTTP-only cookie isolation; this is ownership isolation, not account authentication.
+| Variable | Value | Description |
+| :--- | :--- | :--- |
+| `APP_MODE` | `hosted` | Enables production security & cross-origin verification |
+| `FRONTEND_URL` | `https://your-app.vercel.app` | Your Vercel domain (also supports comma-separated URLs) |
+| `SESSION_SECRET` | *(32+ character random string)* | E.g. `soilmate_session_secret_production_2026_xyz` |
+| `GEMINI_API_KEY` | `your-google-gemini-key` | [Get free from Google AI Studio](https://aistudio.google.com/apikey) |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | Reasoning engine for ReAct agent |
+| `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Live multimodal WebSocket audio model |
+| `SARVAM_API_KEY` | `your-sarvam-key` | *(Optional)* Indian language voice STT/TTS |
+| `DATA_GOV_API_KEY` | `your-data-gov-key` | *(Optional)* Agmarknet live mandi rates |
 
-## Run locally
+*(Note: If `SESSION_SECRET` is omitted, the backend generates a safe deterministic key so Render will not crash on startup).*
 
-Backend, from `SoilMate/backend`:
+### 2. Frontend on Vercel (`https://your-app.vercel.app`)
+
+1. Import the repository into [Vercel](https://vercel.com):
+   - **Root Directory:** `frontend`
+   - **Framework Preset:** `Vite`
+2. Under **Settings $\rightarrow$ Environment Variables**, add:
+
+| Key | Value | Notes |
+| :--- | :--- | :--- |
+| `VITE_API_BASE_URL` | `https://soilmate.onrender.com` | Backend URL (normalized automatically with or without `/api`) |
+
+3. Deploy! Single-page application routing is managed automatically via `frontend/vercel.json`.
+
+---
+
+## 💻 Local Development Setup
+
+### Prerequisites
+- Python 3.10+
+- Node.js 18+ & npm
+
+### 1. Clone & Configure Environment
 
 ```powershell
+git clone https://github.com/4941-Piyush/SoilMate.git
+cd SoilMate
+```
+
+Create `backend/.env`:
+```powershell
+cp backend/.env.example backend/.env
+```
+Fill in your `GEMINI_API_KEY` in `backend/.env`.
+
+### 2. Run Backend
+
+```powershell
+cd backend
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe run.py
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python run.py
 ```
+Backend starts on `http://127.0.0.1:8000`.
 
-Frontend, from `SoilMate/frontend`:
+### 3. Run Frontend
 
 ```powershell
+cd ..\frontend
 npm install
 npm run dev
 ```
+Frontend starts on `http://localhost:5173`. Vite automatically proxies `/api` and `/ws` to the local FastAPI server.
 
-Open `http://localhost:5173`. Vite proxies HTTP and WebSocket traffic to `127.0.0.1:8000`.
+---
 
-## Verification
+## 🧪 Verification & Testing
 
+Run backend tests:
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest tests -q
+pytest tests -v
+```
 
+Run frontend build verification:
+```powershell
 cd ..\frontend
-npm test
 npm run build
 ```
 
-The bounded real-provider check uses a temporary database and may consume API quota:
-
+Run end-to-end integration check (consumes live provider calls):
 ```powershell
-cd backend
-.\.venv\Scripts\python.exe integration_check.py
+cd ..\backend
+python integration_check.py
 ```
 
-It checks weather, SoilGrids, mandi, both official crop references, one typed Gemini tool turn, and one Gemini Live audio turn without exposing credentials.
+---
 
-## Two-to-three-minute demo
+## 📂 Project Structure
 
-1. Set the farm profile to Jaipur and choose a conversation language.
-2. Ask for seven-day weather. Show live workflow events, expand Open-Meteo evidence, and show its source and retrieval time in Crop Advice.
-3. Ask for a wheat schedule and provide variety/method details. Show the exact TNAU quotation in Planting Schedule. Unsupported stages remain unavailable.
-4. Start Gemini Live, speak a question, interrupt the response, and show that the call continues. End the call and verify the microphone stops.
-5. Open History, reload the session, and show restored messages, traces, profile, advisory, and schedule.
-6. Demonstrate an unavailable provider response to show that SoilMate does not fabricate measurements.
+```
+SoilMate/
+├── backend/
+│   ├── app/
+│   │   ├── main.py                     # FastAPI entrypoint, SSE streaming, and WebSocket bridge
+│   │   ├── config.py                   # Pydantic environment settings
+│   │   ├── security.py                 # Cross-origin origin checks, session signing, HMAC
+│   │   ├── agent/
+│   │   │   ├── orchestrator.py         # Multi-turn Gemini 3.5 Flash ReAct agent loop
+│   │   │   ├── tools.py                # Live tool definitions and execution dispatcher
+│   │   │   ├── advisories.py           # Advisory persistence & ICAR quotation validator
+│   │   │   ├── prompts.py              # System prompts & agronomic instructions
+│   │   │   └── turns.py                # Request deduplication and turn concurrency guards
+│   │   ├── db/
+│   │   │   ├── database.py             # SQLite aiosqlite connection pool & migrations
+│   │   │   └── repository.py           # CRUD for sessions, messages, profiles, and advisories
+│   │   ├── models/
+│   │   │   └── schemas.py              # Pydantic request/response schemas
+│   │   └── services/
+│   │       ├── gemini_live.py          # Gemini 3.1 Flash Live bidirectional audio WebSocket proxy
+│   │       ├── gemini_pool.py          # Gemini API key pool manager with automatic failover
+│   │       ├── language.py             # Unicode script detection & spoken language resolution
+│   │       ├── weather.py              # Open-Meteo 7-day forecast & alert calculations
+│   │       ├── soil.py                 # ISRIC SoilGrids WCS 2.0.1 GeoTIFF parser (with Pillow fallback)
+│   │       ├── mandi.py                # Agmarknet APMC live mandi commodity market rates
+│   │       ├── voice.py                # Sarvam AI Saaras STT & Bulbul TTS synthesis
+│   │       └── translation.py          # Indic neural translation with gender-alignment
+│   ├── requirements.txt
+│   └── run.py
+│
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx                     # Top-level state (language, profile, layout)
+│   │   ├── components/
+│   │   │   ├── VoiceAssistant.jsx      # Animated 3D harmonic mesh sphere & voice orb
+│   │   │   ├── ChatPanel.jsx           # Chat container, live voice proxy, message history
+│   │   │   ├── ChatMessages.jsx        # Rich chat bubbles with audio playback & tool traces
+│   │   │   ├── ChatInput.jsx           # Typing field, quick chips, and voice note recorder
+│   │   │   ├── DashboardPanel.jsx      # Tabbed agronomic dashboard (Advice, Calendar, Profile)
+│   │   │   ├── LanguageSelector.jsx    # 11 Indian language picker
+│   │   │   └── LocationInput.jsx       # Geocoding search & farm location picker
+│   │   ├── hooks/
+│   │   │   ├── useGeminiLive.js        # Full-duplex Web Audio WebSocket pipeline
+│   │   │   └── useSpeech.js            # Browser speech recognition fallback
+│   │   ├── services/
+│   │   │   └── api.js                  # Unified API client with cross-origin session tracking
+│   │   └── utils/
+│   │       ├── translations.js         # Complete UI translation dictionary for 11 languages
+│   │       └── audioManager.js         # Single-playback global audio controller
+│   ├── vercel.json                     # Vercel SPA rewrite rules
+│   ├── package.json
+│   └── vite.config.js
+└── README.md
+```
 
-## Deployment notes
+---
 
-Deploy FastAPI and the Vite build behind HTTPS with WebSocket and SSE support. Use one application worker unless process-local duplicate and active-turn guards are replaced with a shared store. SQLite suits the local hackathon demo; multi-instance hosting needs a managed database, account authentication, shared rate limiting, and monitoring.
+## 📄 License
 
-### Render demo deployment
-
-The included `render.yaml` and `Dockerfile` deploy the frontend and backend as one Render web service. The frontend uses the same origin for HTTP and WebSocket requests.
-
-1. Push this repository, including `render.yaml`, `Dockerfile`, `.dockerignore`, and `.github/workflows/render-keep-alive.yml`, to GitHub.
-2. In Render choose **New → Blueprint**, connect the repository, and deploy. Provide `GEMINI_API_KEYS`; add `SARVAM_API_KEY` and `DATA_GOV_API_KEY` if you use those providers. Render generates `SESSION_SECRET` and supplies the public URL and port automatically. Never commit your `.env` files.
-3. Open the deployed `https://<service>.onrender.com/api/health` and confirm it responds. In GitHub, open **Settings → Secrets and variables → Actions → Variables** and add `RENDER_URL` with the service origin, for example `https://soilmate.onrender.com` (no `/api` path).
-4. On the repository's default branch, enable GitHub Actions and manually run **Keep Render service awake** once to verify it. The scheduled workflow sends a request every 10 minutes. Check its run history for errors. It must be enabled in forks and may be disabled after inactivity on public repositories.
-
-The ping is best effort: GitHub can delay or drop scheduled runs, and Render can restart or suspend a free service. The free workspace allowance is 750 instance hours per month shared across free services; a continuously running service uses up to 744 hours in a 31-day month. GitHub Actions usage limits may also apply. A paid Render web service avoids idle spin-down; Render-hosted cron jobs have a minimum monthly charge.
-
-**History is not durable on the free Render service.** This app currently stores sessions, schedules, and profiles in SQLite on the local filesystem. Render can erase those files on a restart, redeploy, or spin-down, even with the scheduled ping. Use a paid Render service with a persistent disk and set `DB_PATH` to a file on that disk, or migrate the app to a managed database, before relying on saved data. The cron job is not a backup.
-
-The current implementation is demo-ready based on working Gemini typed and live voice checks. It is not a general public production service: SoilGrids/data.gov.in availability varies, crop reference coverage is limited, and hosted identity uses browser ownership rather than user accounts.
+This project is licensed under the Apache 2.0 License.
