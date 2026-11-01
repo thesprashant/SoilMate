@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, WebSo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from app.security import owner, identity, new_identity, allowed_origins, validate_deployment
+from app.security import owner, identity, new_identity, allowed_origins, origin_is_allowed, validate_deployment
 from app.agent.turns import turn_guard, active
 from app.db.repository import create_or_update_session, patch_profile
 from app.models.schemas import ProfileUpdate
@@ -71,30 +71,39 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS setup
+# CORS setup: allows explicit origins, all vercel preview/prod apps, and headers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins(),
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["X-Soilmate-Owner", "Content-Length", "Content-Type"],
 )
 
 request_times = {}
 
 @app.middleware("http")
 async def browser_scope(request: Request, call_next):
+    # Allow preflight OPTIONS requests to pass through cleanly to CORS middleware
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     if settings.app_mode == "local" and request.client and request.client.host not in {"127.0.0.1", "::1", "localhost", "test", "testclient"}:
         return JSONResponse({"detail": "Local demo accepts loopback clients only"}, status_code=403)
+
     origin = request.headers.get("origin")
-    if origin and origin.rstrip("/") not in allowed_origins():
+    if origin and not origin_is_allowed(origin):
         return JSONResponse({"detail": "Origin not allowed"}, status_code=403)
+
     try:
         content_length = int(request.headers.get("content-length", "0") or 0)
     except ValueError:
         return JSONResponse({"detail": "Invalid content length"}, status_code=400)
     if content_length > 12 * 1024 * 1024:
         return JSONResponse({"detail": "Upload too large"}, status_code=413)
+
     if request.method in {"POST", "PATCH", "DELETE"}:
         now = time.monotonic()
         ip = request.client.host if request.client else "unknown"
@@ -107,15 +116,27 @@ async def browser_scope(request: Request, call_next):
         if len(recent) >= 60 or len(request_times) > 5000:
             return JSONResponse({"detail": "Too many requests; retry in a minute"}, status_code=429)
         recent.append(now)
-    who = identity(request.cookies.get("soilmate_owner"))
+
+    owner_raw = request.headers.get("x-soilmate-owner") or request.cookies.get("soilmate_owner")
+    who = identity(owner_raw)
     cookie = None
     if not who:
         who, cookie = new_identity()
     token = owner.set(who)
     try:
         response = await call_next(request)
+        token_to_send = cookie or owner_raw
         if cookie:
-            response.set_cookie("soilmate_owner", cookie, httponly=True, secure=True, samesite="lax", max_age=2592000)
+            response.set_cookie(
+                "soilmate_owner",
+                cookie,
+                httponly=True,
+                secure=True,
+                samesite="none",
+                max_age=2592000
+            )
+        if token_to_send:
+            response.headers["X-Soilmate-Owner"] = token_to_send
         return response
     finally:
         owner.reset(token)
@@ -232,10 +253,21 @@ async def gemini_live_endpoint(websocket: WebSocket):
     native emotional voice synthesis, real-time barge-in, and autonomous tool calling.
     """
     origin = websocket.headers.get("origin")
-    who = identity(websocket.cookies.get("soilmate_owner"))
-    if not who or (origin and origin.rstrip("/") not in allowed_origins()) or (settings.app_mode == "local" and websocket.client.host not in {"127.0.0.1", "::1", "localhost", "testclient"}):
+    if origin and not origin_is_allowed(origin):
+        logger.warning(f"[GeminiLive] Origin {origin} rejected")
         await websocket.close(code=1008)
         return
+
+    # Extract owner from query param, header, or cookie
+    owner_token = (
+        websocket.query_params.get("owner") or
+        websocket.headers.get("x-soilmate-owner") or
+        websocket.cookies.get("soilmate_owner")
+    )
+    who = identity(owner_token)
+    if not who:
+        who, _ = new_identity()
+
     token = owner.set(who)
     try:
         await handle_gemini_live_websocket(websocket)

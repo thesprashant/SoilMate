@@ -76,7 +76,8 @@ def detect_language_from_text(text: str) -> str:
             "kya", "hai", "hain", "khet", "fasal", "gehu", "gehun", "dhan", "sarson",
             "pani", "paani", "barish", "kab", "kare", "karein", "khad", "daale",
             "batao", "bataiye", "salah", "sujhav", "beej", "mandi", "bhav", "daam",
-            "mera", "meri", "mere", "aap", "kaise", "kitna", "kitni", "namaste"
+            "mera", "meri", "mere", "aap", "kaise", "kitna", "kitni", "namaste",
+            "ka", "ki", "ke", "ko", "se", "me", "mein", "par", "bhi", "nahi"
         }
         if len(tokens & hinglish_words) >= 2 or any(w in tokens for w in ["kya", "khet", "fasal", "khad", "gehu"]):
             return "hi"
@@ -150,28 +151,51 @@ def resolve_spoken_language(message: str, spoken_hint: Optional[str] = None) -> 
     Determine the actual language being spoken/typed by the farmer.
     Requirement: Chat and all generated agronomic advice must strictly follow
     the language being spoken, independent of the UI language.
+    Keeps and maintains the established spoken language across multi-turn conversations.
     """
     if not message or not message.strip():
         return normalize_language_code(spoken_hint) or "hi"
 
     detected = detect_language_from_text(message)
 
-    # If text is in Latin characters (English or ambiguous words like place names)
-    if detected == "en":
-        tokens = set(re.findall(r'\b[a-zA-Z]+\b', message.lower()))
-        english_words = {
-            "what", "when", "why", "where", "how", "can", "could", "should", "will",
-            "is", "are", "do", "does", "plant", "crop", "crops", "weather", "rain",
-            "soil", "fertilizer", "price", "mandi", "hello", "hi", "help", "please",
-            "suggest", "recommend", "season", "field", "farm", "acres"
-        }
-        # If it has English grammatical words, user is speaking/typing English
-        if tokens & english_words:
-            return "en"
-        # If no English indicator words and a non-English spoken hint was provided (e.g., spoken input)
-        if spoken_hint and spoken_hint != "en":
-            return normalize_language_code(spoken_hint)
+    # If an Indic script was identified, always respect that script
+    if detected != "en":
+        return detected
+
+    # Text is in Latin alphabet (English, romanized Indic, or short keyword query)
+    tokens = set(re.findall(r'\b[a-zA-Z]+\b', message.lower()))
+
+    # Check for romanized Indic / Hinglish markers
+    hinglish_markers = {
+        "kya", "hai", "hain", "khet", "fasal", "gehu", "gehun", "dhan", "sarson",
+        "pani", "paani", "barish", "kab", "kare", "karein", "khad", "daale",
+        "batao", "bataiye", "salah", "sujhav", "beej", "bhav", "daam",
+        "mera", "meri", "mere", "aap", "kaise", "kitna", "kitni", "namaste",
+        "ka", "ki", "ke", "ko", "se", "me", "mein", "par", "bhi", "nahi"
+    }
+    if tokens & hinglish_markers:
+        return "hi"
+
+    # Distinct grammatical words indicating actual English sentence construction
+    english_grammar_words = {
+        "what", "when", "why", "where", "how", "which", "who", "whom",
+        "can", "could", "should", "would", "will", "shall", "must",
+        "is", "are", "was", "were", "am", "do", "does", "did",
+        "please", "tell", "explain", "give", "suggest", "recommend",
+        "about", "with", "from", "into", "because", "have", "has", "had"
+    }
+    grammar_matches = tokens & english_grammar_words
+
+    # Full English sentence structure (e.g. "what should I plant", "tell me about rainfall")
+    if len(grammar_matches) >= 2 or (len(grammar_matches) >= 1 and len(tokens) >= 4):
         return "en"
 
-    return detected
+    # If a non-English language was already established in the conversation, KEEP IT!
+    # Short loanwords (e.g., 'weather', 'mandi', 'urea', '10 acres') do not break language continuity.
+    if spoken_hint and spoken_hint != "en":
+        return normalize_language_code(spoken_hint)
 
+    if len(grammar_matches) >= 1:
+        return "en"
+
+    return normalize_language_code(spoken_hint) if spoken_hint else "en"

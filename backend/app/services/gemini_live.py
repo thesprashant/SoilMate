@@ -22,6 +22,7 @@ from app.db.repository import (
     get_session_messages,
     save_advisory
 )
+from app.services.language import resolve_spoken_language, normalize_language_code
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +80,10 @@ async def handle_gemini_live_websocket(client_ws: WebSocket):
         init_data = json.loads(init_raw)
 
         session_id = init_data.get("session_id")
-        ui_language = init_data.get("language") or "hi"
+        ui_language = normalize_language_code(init_data.get("language") or "hi")
         location_ctx = init_data.get("location")
         if location_ctx:
             location_ctx = LocationInput(**location_ctx).model_dump()
-        from app.services.language import normalize_language_code
-        ui_language = normalize_language_code(ui_language)
         candidate_guard = turn_guard(session_id)
         await candidate_guard.__aenter__()
         guard = candidate_guard
@@ -95,6 +94,9 @@ async def handle_gemini_live_websocket(client_ws: WebSocket):
             if not sess:
                 raise ValueError("Session not found")
             if sess:
+                # If session has an established spoken language, preserve it
+                if sess.get("language"):
+                    ui_language = normalize_language_code(sess.get("language"))
                 farmer_profile = {
                     "location_name": sess.get("location_name"),
                     "latitude": sess.get("latitude"),
@@ -114,7 +116,7 @@ async def handle_gemini_live_websocket(client_ws: WebSocket):
             await patch_profile(session_id, farmer_profile)
 
         # Build dynamic context for Gemini System Instruction
-        context_block = f"\n\nCURRENT SESSION CONTEXT:\n- Session ID: {session_id}\n- Farmer's UI/Spoken Language: {ui_language}\n"
+        context_block = f"\n\nCURRENT SESSION CONTEXT:\n- Session ID: {session_id}\n- Current Spoken/Preferred Language: {ui_language}\n"
         if location_ctx:
             context_block += f"- Active Farm Location: {location_ctx.get('name')} (lat: {location_ctx.get('lat')}, lon: {location_ctx.get('lon')})\n"
         if farmer_profile.get("location_name"):
@@ -122,9 +124,17 @@ async def handle_gemini_live_websocket(client_ws: WebSocket):
 
         system_instruction_text = (
             f"{SOILMATE_SYSTEM_PROMPT}\n{context_block}\n"
-            f"IMPORTANT FOR REAL-TIME VOICE: Speak naturally, warmly, and in short 2-3 sentence conversational turns. "
-            f"Address the farmer in {ui_language} with high respect and warmth (Priya persona). "
-            f"Do not recite long bullet lists; ask engaging follow-up questions to converse like a real person."
+            f"CRITICAL MULTILINGUAL SPOKEN LANGUAGE INSTRUCTION:\n"
+            f"1. AUTOMATIC SPOKEN LANGUAGE DETECTION: The farmer may speak to you in any Indian language or dialect "
+            f"(e.g., Hindi, Telugu, Tamil, Marathi, Punjabi, Gujarati, Bengali, Kannada, Malayalam, Odia, or English).\n"
+            f"2. ALWAYS RESPOND IN THE EXACT SAME SPOKEN LANGUAGE: You MUST match and speak back in the farmer's spoken language fluently and naturally! "
+            f"If the farmer speaks in Telugu, you MUST speak back in natural Telugu. If the farmer speaks Marathi, reply in Marathi. "
+            f"If Hindi, reply in Hindi. If Punjabi, reply in Punjabi. If Bengali, reply in Bengali. If English, reply in English.\n"
+            f"3. KEEP AND MAINTAIN THE LANGUAGE: Once a language is spoken by the farmer, KEEP conversing in that exact language across all future turns "
+            f"until the farmer explicitly switches to a different language.\n"
+            f"4. If the farmer has not spoken yet at session start, use {ui_language} only as the initial gentle greeting.\n"
+            f"5. IMPORTANT FOR REAL-TIME VOICE: Speak naturally, warmly, and in short 2-3 sentence conversational turns. "
+            f"Address the farmer with deep respect and warmth (Priya persona). Do not recite long bullet lists; converse warmly like a caring village agricultural advisor."
         )
 
         # Candidate live model list: prioritize fastest, highest-quality Live API models
@@ -347,7 +357,7 @@ async def handle_gemini_live_websocket(client_ws: WebSocket):
                 await safe_close_ws(google_ws)
 
         async def google_to_client():
-            nonlocal current_turn_user_text, current_turn_model_text, current_turn_tool_traces, farmer_profile
+            nonlocal current_turn_user_text, current_turn_model_text, current_turn_tool_traces, farmer_profile, ui_language
             try:
                 async for raw_msg in google_ws:
                     resp_json = json.loads(raw_msg)
@@ -394,23 +404,36 @@ async def handle_gemini_live_websocket(client_ws: WebSocket):
                             user_full = " ".join(current_turn_user_text).strip()
                             model_full = "".join(current_turn_model_text).strip()
 
+                            # Automatically detect the language of the conversation
+                            detected_lang = ui_language
+                            if user_full:
+                                detected_lang = resolve_spoken_language(user_full, spoken_hint=ui_language)
+                            elif model_full:
+                                detected_lang = resolve_spoken_language(model_full, spoken_hint=ui_language)
+
+                            # Keep this language for subsequent live turns!
+                            ui_language = detected_lang
+
+                            # Persist detected language in SQLite session
+                            await create_or_update_session(session_id=session_id, language=detected_lang)
+
                             history = await get_session_messages(session_id)
                             user_context = " ".join((m.get("content_english") or m.get("content") or "") for m in history if m.get("role") == "user") + " " + user_full
-                            advisory_id = await persist_advice(session_id, ui_language, model_full, farmer_profile, current_turn_tool_traces, user_text=user_context)
+                            advisory_id = await persist_advice(session_id, detected_lang, model_full, farmer_profile, current_turn_tool_traces, user_text=user_context)
                             if user_full or model_full:
                                 # Save user message
                                 await save_message(
                                     session_id=session_id,
                                     role="user",
                                     content=user_full,
-                                    language=ui_language
+                                    language=detected_lang
                                 )
                                 # Save assistant message with tool traces
                                 await save_message(
                                     session_id=session_id,
                                     role="assistant",
                                     content=model_full,
-                                    language=ui_language,
+                                    language=detected_lang,
                                     tool_calls=current_turn_tool_traces,
                                     advisory_id=advisory_id
                                 )
@@ -419,7 +442,7 @@ async def handle_gemini_live_websocket(client_ws: WebSocket):
                                 "type": "turn_complete",
                                 "session_id": session_id,
                                 "farmer_profile": farmer_profile,
-                                "language": ui_language,
+                                "language": detected_lang,
                                 "user_content": user_full,
                                 "content": model_full,
                                 "tool_calls": current_turn_tool_traces,
@@ -505,4 +528,3 @@ async def handle_gemini_live_websocket(client_ws: WebSocket):
         except Exception:
             pass
         logger.info("[GeminiLive] Session closed.")
-

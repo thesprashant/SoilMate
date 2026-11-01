@@ -110,7 +110,7 @@ async def run_agent_turn(
     """
     Execute a full turn of the SoilMate ReAct Agent:
     1. Detect language & translate to English.
-    2. Run dynamic ReAct loop in English with Gemini 2.0 Flash.
+    2. Run dynamic ReAct loop in English with Gemini 3.5 Flash.
     3. Stream real-time progress callbacks (for SSE).
     4. Auto-save history & crop advisories to SQLite.
     5. Translate response back to native language + generate TTS.
@@ -123,15 +123,18 @@ async def run_agent_turn(
             except Exception as e:
                 logger.warning(f"[run_agent_turn] progress_callback error: {e}")
 
-    # Step 1: Ingestion & Language Identification
-    # Requirement: Chat and all generated content MUST follow the language being spoken/typed!
-    lang_code = resolve_spoken_language(message, spoken_hint=language_hint)
-    lang_meta = SUPPORTED_INDIAN_LANGUAGES.get(lang_code, {"name": "Hindi", "native": "हिन्दी"})
-
     # Check for existing session and saved profile in DB (Conversational Memory)
     existing_session = None
     if session_id:
         existing_session = await get_session(session_id)
+
+    # Step 1: Ingestion & Language Identification
+    # Requirement: Chat and all generated content MUST follow the language being spoken/typed!
+    # Conversational memory: if session was already conducted in a language, maintain that as default hint!
+    session_lang = existing_session.get("language") if existing_session else None
+    effective_hint = language_hint or session_lang
+    lang_code = resolve_spoken_language(message, spoken_hint=effective_hint)
+    lang_meta = SUPPORTED_INDIAN_LANGUAGES.get(lang_code, {"name": "Hindi", "native": "हिन्दी"})
 
     saved_loc_name = existing_session.get("location_name") if existing_session else None
     saved_lat = existing_session.get("latitude") if existing_session else None
@@ -398,4 +401,3 @@ async def run_agent_turn(
 
     await emit_progress("complete", "Analysis complete.", data=final_result.model_dump())
     return final_result
-

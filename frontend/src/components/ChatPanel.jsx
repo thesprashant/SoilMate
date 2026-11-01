@@ -53,6 +53,7 @@ export default function ChatPanel({
       setStreamingEvent(null)
       if (data.session_id) setSessionId(data.session_id)
       if (data.farmer_profile) setFarmerProfile?.(data.farmer_profile)
+      if (data.language) setSpokenLanguage?.(data.language)
       const records = []
       if (data.user_content) records.push({ id: crypto.randomUUID(), role: 'user', content: data.user_content, language: data.language })
       if (data.content) records.push({ id: crypto.randomUUID(), role: 'assistant', content: data.content, language: data.language, tool_calls: data.tool_calls || [], advisory_id: data.advisory_id })
@@ -60,16 +61,17 @@ export default function ChatPanel({
     },
     onError: err => { setError(err.message); setStreamingEvent(null) }
   })
-  const handleSendMessage = async text => {
+  const handleSendMessage = async (text, detectedLang = null) => {
     if (!text.trim() || disabled || loading) return
     stopCurrentAudio(); geminiLive.disconnectLive(); abortControllerRef.current?.abort()
     const controller = new AbortController(); abortControllerRef.current = controller
     setError(''); setLoading(true); onUserActivity?.()
+    const activeLang = (typeof detectedLang === 'string' && detectedLang) ? detectedLang : spokenLanguage
     try {
       const sid = await ensureSession()
       if (controller.signal.aborted) return
-      setMessages(previous => [...previous, { id: crypto.randomUUID(), role: 'user', content: text, language: spokenLanguage }])
-      await chatStream({ message: text, sessionId: sid, language: spokenLanguage, location, voiceOutput: true, signal: controller.signal }, {
+      setMessages(previous => [...previous, { id: crypto.randomUUID(), role: 'user', content: text, language: activeLang }])
+      await chatStream({ message: text, sessionId: sid, language: activeLang, location, voiceOutput: true, signal: controller.signal }, {
         onProgress: ev => { if (!controller.signal.aborted) acceptProgress(ev) },
         onComplete: data => {
           if (controller.signal.aborted) return
@@ -87,7 +89,7 @@ export default function ChatPanel({
 
   // Voice speech hook uses the active spokenLanguage
   const speech = useSpeech(spokenLanguage, (transcript) => {
-    handleSendMessage(transcript, true)
+    handleSendMessage(transcript)
   })
 
   const isLiveActive = geminiLive.active || geminiLive.connecting
@@ -196,7 +198,7 @@ export default function ChatPanel({
 
             {/* Chat Typing Input */}
             <ChatInput
-              onSendMessage={(txt) => handleSendMessage(txt, false)}
+              onSendMessage={(txt, lang) => handleSendMessage(txt, lang)}
               language={spokenLanguage}
               placeholder={t.typePlaceholder}
               disabled={loading || disabled || isLiveActive}

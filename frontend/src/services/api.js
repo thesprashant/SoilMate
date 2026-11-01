@@ -1,7 +1,35 @@
 // ===== SOILMATE REAL-TIME API CLIENT =====
 // Connects directly to FastAPI and preserves explicit provider failure states.
 
-export const BASE = import.meta.env?.VITE_API_BASE_URL || '/api'
+function getBaseUrl() {
+  const envUrl = import.meta.env?.VITE_API_BASE_URL
+  if (!envUrl) return '/api'
+  const trimmed = envUrl.trim().replace(/\/+$/, '')
+  // Normalize: if user provided host without /api (e.g. https://soilmate.onrender.com), append /api
+  if (!trimmed.endsWith('/api')) {
+    return `${trimmed}/api`
+  }
+  return trimmed
+}
+
+export const BASE = getBaseUrl()
+
+function getStoredOwner() {
+  try {
+    return localStorage.getItem('soilmate_owner') || ''
+  } catch {
+    return ''
+  }
+}
+
+function saveOwnerFromResponse(res) {
+  try {
+    const ownerHeader = res.headers.get('x-soilmate-owner')
+    if (ownerHeader) {
+      localStorage.setItem('soilmate_owner', ownerHeader)
+    }
+  } catch {}
+}
 
 async function request(path, options = {}) {
   const url = `${BASE}${path}`
@@ -11,7 +39,14 @@ async function request(path, options = {}) {
     headers['Content-Type'] = 'application/json'
   }
 
+  const owner = getStoredOwner()
+  if (owner && !headers['X-Soilmate-Owner']) {
+    headers['X-Soilmate-Owner'] = owner
+  }
+
   const res = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(30000), ...options, headers })
+  saveOwnerFromResponse(res)
+
   if (!res.ok) {
     let errorDetail = `Request failed (${res.status})`
     try {
@@ -52,15 +87,21 @@ export async function chatStream(
   { onProgress, onComplete, onError }
 ) {
   const url = `${BASE}/chat/stream`
+  const owner = getStoredOwner()
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'text/event-stream'
+  }
+  if (owner) {
+    headers['X-Soilmate-Owner'] = owner
+  }
+
   try {
     const res = await fetch(url, {
       method: 'POST',
       credentials: 'include',
       signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream'
-      },
+      headers,
       body: JSON.stringify({
         request_id: crypto.randomUUID(),
         message,
@@ -70,6 +111,7 @@ export async function chatStream(
         voice_output: voiceOutput
       })
     })
+    saveOwnerFromResponse(res)
 
     if (!res.ok) {
       let detail = `Stream request failed (${res.status})`
@@ -218,8 +260,13 @@ export async function synthesizeSpeech(text, language = 'hi') {
 export const createSession = () => request('/sessions', { method: 'POST' })
 export const fetchCalendars = (limit = 50) => request(`/calendars?limit=${limit}`)
 export const updateProfile = (id, profile) => request(`/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(profile) })
+
 export function liveSocketUrl() {
   const url = new URL(`${BASE.replace(/\/$/, '')}/ws/live`, window.location.href)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  const owner = getStoredOwner()
+  if (owner) {
+    url.searchParams.set('owner', owner)
+  }
   return url.toString()
 }

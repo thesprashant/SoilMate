@@ -56,7 +56,7 @@ export default function ChatInput({ onSendMessage, language, placeholder, disabl
           const res = await uploadSpeechAudio(audioBlob, language)
           if (!mounted.current) return
           if (res.text) {
-            onSendMessage(res.text)
+            onSendMessage(res.text, res.language)
           } else {
             alert('Could not transcribe audio. Please try typing.')
           }

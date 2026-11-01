@@ -3,7 +3,7 @@ import logging
 from typing import Dict, Any, Optional
 import httpx
 from app.config import settings
-from app.services.language import normalize_language_code
+from app.services.language import normalize_language_code, resolve_spoken_language
 from app.services.translation import SARVAM_LANG_MAP
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,12 @@ async def speech_to_text(audio_bytes: bytes, filename: str = "audio.wav", langua
             "error": "SARVAM_API_KEY not configured. Speech-to-text requires Sarvam AI API key."
         }
 
-    lang_code = SARVAM_LANG_MAP.get(normalize_language_code(language_hint), "hi-IN")
+    # If language_hint is explicitly given, map it; otherwise use "unknown" for auto-detection
+    if not language_hint or language_hint in ("auto", "unknown"):
+        lang_code = "unknown"
+    else:
+        lang_code = SARVAM_LANG_MAP.get(normalize_language_code(language_hint), "unknown")
+
     url = "https://api.sarvam.ai/speech-to-text"
     headers = {
         "api-subscription-key": sarvam_key
@@ -41,7 +46,10 @@ async def speech_to_text(audio_bytes: bytes, filename: str = "audio.wav", langua
             if resp.status_code == 200:
                 result = resp.json()
                 transcript = result.get("transcript", "")
-                detected = result.get("language_code", lang_code).split("-")[0]
+                raw_code = result.get("language_code", lang_code)
+                detected = raw_code.split("-")[0] if raw_code and raw_code != "unknown" else (language_hint or "hi")
+                if transcript:
+                    detected = resolve_spoken_language(transcript, spoken_hint=detected)
                 return {
                     "text": transcript.strip(),
                     "language": detected,
@@ -138,4 +146,3 @@ async def text_to_speech(text: str, language: str = "hi") -> Optional[str]:
         logger.error(f"[text_to_speech] TTS error: {e}")
 
     return None
-
