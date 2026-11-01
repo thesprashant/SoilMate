@@ -77,41 +77,59 @@ SoilMate is an autonomous agronomic AI assistant engineered for Indian agricultu
 
 ---
 
-## 🚀 Deployment Guide (Render Backend + Vercel Frontend)
+## 🚀 Deployment Guide (Unified Single Render Web Service)
 
-### 1. Backend on Render (`https://soilmate.onrender.com`)
+SoilMate can be hosted **entirely as a single unified Web Service on Render** (`https://soilmate.onrender.com`), serving both the React frontend and FastAPI backend on the same domain with **zero CORS issues, 1st-party cookies, and instant sub-second WebSocket audio**.
 
-1. Create a **Web Service** on [Render](https://dashboard.render.com) connected to this repository:
-   - **Root Directory:** `backend`
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-2. Under **Environment Variables**, configure:
+You can deploy using either **Docker (Recommended)** or the **Native Python runtime**.
+
+---
+
+### Option A: Docker Deployment (Recommended — 1-Click / Blueprint)
+
+Render automatically detects the root `Dockerfile` and `render.yaml` to build a multi-stage image (Node.js builds Vite frontend $\rightarrow$ Python 3.12 runs unified server):
+
+1. In the [Render Dashboard](https://dashboard.render.com), click **New + $\rightarrow$ Web Service** (or use **Blueprints** with `render.yaml`).
+2. Connect your SoilMate GitHub repository.
+3. Select **Docker** as the Runtime:
+   - **Root Directory:** *(leave blank / repository root)*
+   - **Health Check Path:** `/api/health`
+4. Under **Environment Variables**, configure:
 
 | Variable | Value | Description |
 | :--- | :--- | :--- |
-| `APP_MODE` | `hosted` | Enables production security & cross-origin verification |
-| `FRONTEND_URL` | `https://your-app.vercel.app` | Your Vercel domain (also supports comma-separated URLs) |
-| `SESSION_SECRET` | *(32+ character random string)* | E.g. `soilmate_session_secret_production_2026_xyz` |
+| `APP_MODE` | `hosted` | Enables production security & session cookies |
 | `GEMINI_API_KEY` | `your-google-gemini-key` | [Get free from Google AI Studio](https://aistudio.google.com/apikey) |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Reasoning engine for ReAct agent |
 | `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Live multimodal WebSocket audio model |
+| `SESSION_SECRET` | *(Optional random 32+ char string)* | Auto-generated deterministically if left empty |
 | `SARVAM_API_KEY` | `your-sarvam-key` | *(Optional)* Indian language voice STT/TTS |
 | `DATA_GOV_API_KEY` | `your-data-gov-key` | *(Optional)* Agmarknet live mandi rates |
 
-*(Note: If `SESSION_SECRET` is omitted, the backend generates a safe deterministic key so Render will not crash on startup).*
+5. Click **Create Web Service**! Render will build the frontend and backend together and serve everything at `https://soilmate.onrender.com`.
 
-### 2. Frontend on Vercel (`https://your-app.vercel.app`)
+---
 
-1. Import the repository into [Vercel](https://vercel.com):
-   - **Root Directory:** `frontend`
-   - **Framework Preset:** `Vite`
-2. Under **Settings $\rightarrow$ Environment Variables**, add:
+### Option B: Native Python Runtime on Render
 
-| Key | Value | Notes |
-| :--- | :--- | :--- |
-| `VITE_API_BASE_URL` | `https://soilmate.onrender.com` | Backend URL (normalized automatically with or without `/api`) |
+If you prefer using Render's standard Python runtime (no Docker):
 
-3. Deploy! Single-page application routing is managed automatically via `frontend/vercel.json`.
+1. Create a **Web Service** on [Render](https://dashboard.render.com):
+   - **Runtime:** `Python 3`
+   - **Root Directory:** *(leave blank / repository root)*
+   - **Build Command:** `./build.sh`
+   - **Start Command:** `python run.py`
+   - **Health Check Path:** `/api/health`
+2. Add the environment variables listed in the table above.
+3. Deploy! The `build.sh` script automatically builds the React frontend and installs all Python dependencies.
+
+---
+
+### Dual-Hosting Option (Render Backend + Vercel Frontend)
+
+If you still prefer hosting frontend on Vercel separately:
+1. **Render Backend:** Follow Option A or B above. Set `FRONTEND_URL=https://your-app.vercel.app`.
+2. **Vercel Frontend:** Import repository with Root Directory `frontend`, set `VITE_API_BASE_URL=https://soilmate.onrender.com`. Single-page routing is handled by `frontend/vercel.json`.
 
 ---
 

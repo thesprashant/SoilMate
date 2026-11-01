@@ -50,8 +50,13 @@ def origin_is_allowed(origin: Optional[str]) -> bool:
     if clean_origin in allowed or "*" in allowed:
         return True
 
-    # Automatically permit any Vercel deployment (*.vercel.app)
-    if clean_origin.endswith(".vercel.app") or "vercel.app" in clean_origin:
+    # Automatically permit any Render or Vercel deployment (*.onrender.com, *.vercel.app)
+    if (
+        clean_origin.endswith(".onrender.com")
+        or "onrender.com" in clean_origin
+        or clean_origin.endswith(".vercel.app")
+        or "vercel.app" in clean_origin
+    ):
         return True
 
     for item in allowed:

@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from app.security import owner, identity, new_identity, allowed_origins, origin_is_allowed, validate_deployment
 from app.agent.turns import turn_guard, active
@@ -75,7 +75,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins(),
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=r"https://.*(\.vercel\.app|\.onrender\.com)",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -426,7 +426,41 @@ async def schemes_catalog():
     return {"status": "unavailable", "schemes": [], "total": 0, "note": "Live eligibility verification is not connected.", "source": "https://www.myscheme.gov.in/"}
 
 
-# The Render image includes the built frontend. Local development uses Vite.
-frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
-if frontend_dist.is_dir():
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+# ============================================================================
+# SINGLE-SERVICE HOSTING (Render Web Service / Docker / Production)
+# Serves the compiled Vite React frontend alongside FastAPI on a single domain.
+# ============================================================================
+frontend_dist = None
+for candidate in [
+    Path(__file__).resolve().parents[2] / "frontend" / "dist",
+    Path("/app/frontend/dist"),
+    Path(__file__).resolve().parents[1] / "frontend" / "dist",
+    Path.cwd() / "frontend" / "dist",
+    Path.cwd() / "dist",
+]:
+    if candidate.is_dir() and (candidate / "index.html").is_file():
+        frontend_dist = candidate
+        break
+
+if frontend_dist:
+    logger.info("Serving built SoilMate frontend from %s", frontend_dist)
+    assets_dir = frontend_dist / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    index_html = frontend_dist / "index.html"
+
+    # Catch-all route for Single-Page Application (SPA) client-side routing
+    @app.get("/{full_path:path}")
+    async def serve_spa_app(full_path: str):
+        # Do not catch backend API routes or documentation
+        if full_path.startswith("api/") or full_path in {"docs", "redoc", "openapi.json"}:
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        # If a specific static asset was requested from root (e.g. favicon.svg, vite.svg, manifest.json)
+        asset_file = (frontend_dist / full_path).resolve()
+        if str(asset_file).startswith(str(frontend_dist.resolve())) and asset_file.is_file():
+            return FileResponse(asset_file)
+
+        # Fallback to index.html for all SPA routes (e.g. /, /advisories, /calendar, etc.)
+        return FileResponse(index_html)
